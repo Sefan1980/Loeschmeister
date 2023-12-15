@@ -27,7 +27,7 @@ int ServoGeschwingigkeitLeiter = 30;                                            
 // Winkel und Winkelberechnungen
 int WinkelGlas;
 int WinkelErstesGlas = WinkelGlas = 1300;                                                                 // Position des ersten Glases angeben - Im weiteren Programmablauf gibt diese Variable an, welches Glas (Winkel in Micros) angefahren wird (Funktion Tanken)
-int WinkelLetztesGlas = 2050;                                                                             // Position des letzten Glases
+int WinkelLetztesGlas = 2300;                                                                             // Position des letzten Glases
 int SchwenkWinkelProGlas = (WinkelLetztesGlas - WinkelErstesGlas) / ((sizeof(PinKontaktGlas)/2) - 1);     // Berechnung für einen gleichmäßigen Schwenkwinkel
 
 // Pumpe
