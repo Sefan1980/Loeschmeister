@@ -126,7 +126,6 @@ void Check(){                                                                   
           Leerlauftimer = millis();                                                                              
           if (BlaulichtAnforderung == 0) {
             BlaulichtAnforderung = 1;
-            Serial.print("Case2");
           }
           break;
 
@@ -157,7 +156,6 @@ void Check(){                                                                   
       Schritt = 1;                                                                                        // Schritt wieder auf 1 setzen (Leiter hoch)
       digitalWrite(PinIN1, LOW);                                                                          // Pumpe aus
       PumpeIstAn = 0;
-      Serial.println("Glas fehlt! Pumpe ist aus!");
     }
 //    Blitzer();                                                                                          // Blaulichtblitz aufrufen
   }
@@ -198,12 +196,10 @@ void Tanken() {
 int Pumpen (int GlasNummer, int Pumpdauer) {
   int PotiWert = analogRead(PinPoti);                                                                     // Poti auslesen
   if (PumpenTimer < millis() && PumpeIstAn == 0){
-    Serial.println("Pumpe ist an.");
     digitalWrite(PinIN1, HIGH);                                                                           // Pumpe einschalten
     PumpeIstAn = 1;
   }
   if (PumpenTimer + Pumpdauer + PotiWert < millis() && PumpeIstAn == 1) {                                 // Nach abgelaufener Zeit (incl. PotiWert)
-    Serial.println("Pumpe ist aus."); Serial.print("POTIWERT: ");Serial.print(PotiWert);
     digitalWrite(PinIN1, LOW);                                                                            // Pumpe aus
     PumpeIstAn = 0;
     GlasDefinitionen[GlasNummer] = 5;                                                                     // Neuen Status setzen
@@ -272,7 +268,6 @@ int LeiterBewegen (int Soll, unsigned long Verzoegerung) {                      
     LeiterTimer = millis();                                                                               // Timer für WarteZeit neu starten
   }
   if (ServoWinkelLeiter == Soll) {                                                                        // Wenn Sollwinkel erreicht ist dann 
-Serial.println("Leiter ist hoch/runter.");
     Schritt++;                                                                                            // zum nächsten Schritt gehen
     if (Schritt == 4) {                                                                                   // Wenn Schritt 4 oder größer (Es gibt nur 3 Schritte)
       InArbeit = 0;
@@ -297,7 +292,6 @@ int DrehkranzBewegen (int Soll, int Verzoegerung) {                             
     DrehkranzTimer = millis();                                                                            // Timer für Wartezeit neu Starten
   }
     if (ServoMicrosDrehkranz == Soll) {                                                                   // Wenn der Winkel erreicht ist,
-  Serial.println("Drehkranz ist positioniert");
     Schritt++;                                                                                            // zum nächsten Schritt gehen
   }
 }
