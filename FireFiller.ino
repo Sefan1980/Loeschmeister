@@ -17,11 +17,11 @@ const int PinPoti = A11;                                                        
 
 // Servovariablen für Drehkranz und Leiter
 int ServoDrehkranzRuhestellung;
-int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 1020;                                             // Istwinkel (in Micros) bei Start und in Ruhestellung
+int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 1018;                                             // Istwinkel (in Micros) bei Start und in Ruhestellung
 int ServoWinkelLeiter;
-int ServoWinkelLeiterRuhestellung = ServoWinkelLeiter = 2;                                                // Winkel in Ruhestellung und IstWinkel (in Grad) bei Start
+int ServoWinkelLeiterRuhestellung = ServoWinkelLeiter = 3;                                                // Winkel in Ruhestellung und IstWinkel (in Grad) bei Start
 int ServoWinkelLeiterHoch = 50;                                                                           // Leiter angehoben (In Grad)
-int ServoGeschwingigkeitDrehkranz = 5;                                                                    // Höhere Werte verlangsamen die Servos
+int ServoGeschwingigkeitDrehkranz = 4;                                                                    // Höhere Werte verlangsamen die Servos
 int ServoGeschwingigkeitLeiter = 30;                                                                      // Höhere Werte verlangsamen die Servos
 
 // Winkel und Winkelberechnungen
@@ -33,14 +33,15 @@ int SchwenkWinkelProGlas = (WinkelLetztesGlas - WinkelErstesGlas) / ((sizeof(Pin
 // Pumpe
 int PumpeIstAn = 0;                                                                                       // Merker
 unsigned long PumpenTimer;                                                                                // Merker für Timer der Pumpe
-int PumpenGeschwindigkeit = 255;                                                                          // 0- 1024 ??? Oder PWM Pin nehmen???
+int PumpenGeschwindigkeit = 255;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
+int PumpenStandardZeit = 5000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
 
 // Blaulicht
 const int Blaulicht[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};                          // Blitzabfolge
 int ON = 0;                                                                                               // Merker fürs Blaulicht
 int Ein = 0;                                                                                              // Merker fürs Blaulicht
 int Zaehler = 0;                                                                                          // Wird in der Funktion Blitzer benötigt. Dias Array Blaulicht wird damit Stück für Stück abgearbeitet
-int LeerlaufZeit = 100;                                                                                   // Nach dieser Ruhezeit, in millis(), fährt die Drehleiter in die Ruhestellung zurück
+int LeerlaufZeit = 1000;                                                                                   // Nach dieser Ruhezeit, in millis(), fährt die Drehleiter in die Ruhestellung zurück
 unsigned long Merker = 0;                                                                                 // Merker für die Verzögerung beim Blaulicht (Tempo) - Dieser Variable wird der Wert von millis() übergeben. 
 int BlaulichtAnforderung = 0;                                                                             // 0 = Kein Blaulicht, 1 = Angefordert, 2 = Baulicht durchläuft die Schleife
 unsigned long Leerlauftimer = 0;                                                                          // Merker für die Ruhezeit, nach Ablauf der Zeit fährt die Drehleiter in die Ruhestellung zurück
@@ -48,7 +49,7 @@ const unsigned long BlaulichtTempo = 36;                                        
 
 //Neopixel
 const int AnzahlLeds = 6;                                                                                 // Anzahl LEDs
-const int LedHelligkeit = 50;                                                                             // Helligkeit 0-255
+const int LedHelligkeit = 200;                                                                            // Helligkeit 0-255
 Adafruit_NeoPixel LedStreifen(AnzahlLeds, PinLed, NEO_GRB + NEO_KHZ800);                                  // Objekt LedStreifen anlegen
 
 // Sonstige Variablen
@@ -56,7 +57,7 @@ int GlasDefinitionen[] = {0,0,0,0,0,0};                                         
 int Schritt = 1;                                                                                          // Diese Variable steuert die Bewegungsabläufe der Servos (Leiter hoch(1), Drehen(2), Leiter runter(3))
 int InArbeit = 0;                                                                                         // Diese Variable sorgt dafür dass erst ein Glas befüllt wird, dann das Nächste
 unsigned long Timer = 0;                                                                                  // Dieser Variable wird der Wert von millis() übergeben - für die Wartezeit bevor das Glas befüllt wird
-unsigned long StandzeitNeuesGlas = 1000;                                                                  // Wie lange muss das Glas dort stehen, bevor es befüllt wird? Angabe in Millisekunden.
+unsigned long StandzeitNeuesGlas = 2000;                                                                  // Wie lange muss das Glas dort stehen, bevor es befüllt wird? Angabe in Millisekunden.
 unsigned long LeiterTimer = millis();                                                                     // Merker - Zuständig für die Geschwindigkeit der Servos
 unsigned long DrehkranzTimer = millis();                                                                  // Merker - Zuständig für die Geschwindigkeit der Servos
 
@@ -81,8 +82,8 @@ void setup() {
   analogWrite(PinENA, PumpenGeschwindigkeit);                                                             // Pumpengeschwindigkeit setzen
 
   
-  Serial.begin(9600);                                                                                     // Wird nur für die serielle Ausgabe benötigt (z.B. beim debuggen)
-  Serial.println("FireFiller - 12.12.2023");                                                              // Datum der Version
+  Serial.begin(115200);                                                                                   // Wird nur für die serielle Ausgabe benötigt (z.B. beim debuggen)
+  Serial.println("FireFiller - 06.01.2024");                                                              // Datum der Version
 
   LedStreifen.begin();                                                                                    // Instanz starten
   LedStreifen.setBrightness(LedHelligkeit);                                                               // Helligkeit setzen
@@ -109,6 +110,7 @@ void Check(){                                                                   
     if (LiveZustand == 0) {                                                                               // 0 = Glas erkannt, 1 = Kein Glas
       switch (GlasDefinitionen[i]) {                                                                      // Mit Switch bestimmen
         case 0:                                                                                           // 0 = Vormals wurde kein Glas erkannt, nun steht hier eins! --> Licht rot, Timer starten, Status auf 1 setzen.
+          Leerlauftimer = millis();
           LedStreifen.setPixelColor(i, LedStreifen.Color(255, 0, 0));                                     // Streifen rot
           LedStreifen.show();                                                                             // Pixel schalten
           Timer = millis();                                                                               // Timer Starten
@@ -131,11 +133,13 @@ void Check(){                                                                   
 
         case 3:                                                                                           // 3 = Timer starten, Status 4 setzen
           PumpenTimer = millis();
+          Leerlauftimer = millis();
           GlasDefinitionen[i] = 4;
           break;
 
-        case 4:                                                                                           // Pumpe ein- und ausschalten, Status auf 5 setzen (in Funktion Pumpen)
-          Pumpen(i, 2000);
+        case 4:                                                                                           // 4 =  Pumpe ein- und ausschalten, Status auf 5 setzen (in Funktion Pumpen)
+          Pumpen(i, PumpenStandardZeit);
+          Leerlauftimer = millis();
           break;
 
         case 5:                                                                                           // 5 = Glas ist voll! Blaulicht abschalten und Licht grün. Status auf 4 setzen.
@@ -149,6 +153,7 @@ void Check(){                                                                   
           break;
       }
     } else if (LiveZustand == 1 && GlasDefinitionen[i] > 0) {                                             // Kein Glas erkannt, vorher stand hier jedoch eins...
+      Leerlauftimer = millis();
       GlasDefinitionen[i] = 0;                                                                            // Status auf 0 setzen
       LedStreifen.setPixelColor(i, LedStreifen.Color(0, 0, 0));                                           // LEDs definieren
       LedStreifen.show();                                                                                 // und schalten (aus)
@@ -195,11 +200,12 @@ void Tanken() {
 //--------------------------------------------------------------------------------FUNKTION PUMPEN--------------------------------------------------------------------------------
 int Pumpen (int GlasNummer, int Pumpdauer) {
   int PotiWert = analogRead(PinPoti);                                                                     // Poti auslesen
+  Serial.println(PotiWert);
   if (PumpenTimer < millis() && PumpeIstAn == 0){
     digitalWrite(PinIN1, HIGH);                                                                           // Pumpe einschalten
     PumpeIstAn = 1;
   }
-  if (PumpenTimer + Pumpdauer + PotiWert < millis() && PumpeIstAn == 1) {                                 // Nach abgelaufener Zeit (incl. PotiWert)
+  if (PumpenTimer + Pumpdauer + (PotiWert*4) < millis() && PumpeIstAn == 1) {                             // Nach abgelaufener Zeit (incl. PotiWert)
     digitalWrite(PinIN1, LOW);                                                                            // Pumpe aus
     PumpeIstAn = 0;
     GlasDefinitionen[GlasNummer] = 5;                                                                     // Neuen Status setzen
