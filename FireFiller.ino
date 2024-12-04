@@ -5,36 +5,36 @@ Servo ServoDrehkranz;                                                           
 Servo ServoLeiter;                                                                                        // Servo-Objekte anlegen
 
 //Pins
-const byte PinKontaktGlas[] = {2, 3, 4, 5, 6, 7};                                                          // Pins der IR-Kontakte
-const byte PinServoDrehkranz = 47;                                                                         // Servo-Pin Drehkranz
-const byte PinServoLeiter = 45;                                                                            // Servo-Pin Leiter
-const byte PinLed = 51 ;                                                                                   // LED Pin (Neopixel)
+const byte PinKontaktGlas[] = {2, 3, 4, 5, 6, 7};                                                         // Pins der IR-Kontakte
+const byte PinServoDrehkranz = 47;                                                                        // Servo-Pin Drehkranz
+const byte PinServoLeiter = 45;                                                                           // Servo-Pin Leiter
+const byte PinLed = 51 ;                                                                                  // LED Pin (Neopixel)
 const int PinENA = A10;                                                                                   // EnA-Pin Motortreiber (PWM-Ansteuerung)
-const byte PinIN1 = 29;                                                                                    // Pin IN1 Motortreiber
-const byte PinIN2 = 31;                                                                                    // Pin IN2 Motortreiber
+const byte PinIN1 = 29;                                                                                   // Pin IN1 Motortreiber
+const byte PinIN2 = 31;                                                                                   // Pin IN2 Motortreiber
 const int PinPoti = A11;                                                                                  // Pin für Poti zur Füllmenge
 
 
 // Servovariablen für Drehkranz und Leiter
 int ServoDrehkranzRuhestellung;
-int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 990;                                             // Istwinkel (in Micros) bei Start und in Ruhestellung
+int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 990;                                              // Istwinkel (in Micros) bei Start und in Ruhestellung
 int ServoWinkelLeiter;
 int ServoWinkelLeiterRuhestellung = ServoWinkelLeiter = 3;                                                // Winkel in Ruhestellung und IstWinkel (in Grad) bei Start
-byte ServoWinkelLeiterHoch = 50;                                                                           // Leiter angehoben (In Grad)
-byte ServoGeschwingigkeitDrehkranz = 4;                                                                    // Höhere Werte verlangsamen die Servos
-byte ServoGeschwingigkeitLeiter = 30;                                                                      // Höhere Werte verlangsamen die Servos
+byte ServoWinkelLeiterHoch = 50;                                                                          // Leiter angehoben (In Grad)
+byte ServoGeschwingigkeitDrehkranz = 4;                                                                   // Höhere Werte verlangsamen die Servos
+byte ServoGeschwingigkeitLeiter = 30;                                                                     // Höhere Werte verlangsamen die Servos
 
 // Winkel und Winkelberechnungen
 int WinkelGlas;
 int WinkelErstesGlas = WinkelGlas = 1270;                                                                 // Position des ersten Glases angeben - Im weiteren Programmablauf gibt diese Variable an, welches Glas (Winkel in Micros) angefahren wird (Funktion Tanken)
 int WinkelLetztesGlas = 2270;                                                                             // Position des letzten Glases
-int SchwenkWinkelProGlas = (WinkelLetztesGlas - WinkelErstesGlas) / (sizeof(PinKontaktGlas) - 1);     // Berechnung für einen gleichmäßigen Schwenkwinkel
+int SchwenkWinkelProGlas = (WinkelLetztesGlas - WinkelErstesGlas) / (sizeof(PinKontaktGlas) - 1);         // Berechnung für einen gleichmäßigen Schwenkwinkel
 
 // Pumpe
 int PumpeIstAn = 0;                                                                                       // Merker
 unsigned long PumpenTimer;                                                                                // Merker für Timer der Pumpe
-int PumpenGeschwindigkeit = 255;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
-int PumpenStandardZeit = 5000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
+int PumpenGeschwindigkeit = 175;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
+int PumpenStandardZeit = 6000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
 
 // Blaulicht
 const int Blaulicht[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};                          // Blitzabfolge
@@ -84,7 +84,7 @@ void setup() {
 
   
   Serial.begin(115200);                                                                                   // Wird nur für die serielle Ausgabe benötigt (z.B. beim debuggen)
-  Serial.println("FireFiller - 06.01.2024");                                                              // Datum der Version
+  Serial.println("FireFiller - 04.12.2024");                                                              // Datum der Version
 
   LedStreifen.begin();                                                                                    // Instanz starten
   LedStreifen.setBrightness(LedHelligkeit);                                                               // Helligkeit setzen
@@ -111,8 +111,8 @@ void loop() {
 //--------------------------------------------------------------------------------FUNKTION CHECK--------------------------------------------------------------------------------
 void Check(){                                                                                             // Livezustände checken und mit gemerkten Zuständen vergleichen. Stati und LEDs nach Situation verändern. 
   
-  for (int i = 0; i < sizeof(PinKontaktGlas); i++) {                                                 // Kontaktnummer zum Auslesen festlegen
-    //int LiveZustand = digitalRead(PinKontaktGlas[i]);                                                     // Kontakt auslesen und Wert in Variable schreiben
+  for (int i = 0; i < sizeof(PinKontaktGlas); i++) {                                                      // Kontaktnummer zum Auslesen festlegen
+    //int LiveZustand = digitalRead(PinKontaktGlas[i]);                                                   // Kontakt auslesen und Wert in Variable schreiben
     if (!digitalRead(PinKontaktGlas[i])) {                                                                               // 0 = Glas erkannt, 1 = Kein Glas
       switch (GlasDefinitionen[i]) {                                                                      // Mit Switch bestimmen
         case 0:                                                                                           // 0 = Vormals wurde kein Glas erkannt, nun steht hier eins! --> Licht rot, Timer starten, Status auf 1 setzen.
@@ -122,10 +122,10 @@ void Check(){                                                                   
           } else if(millis() >= GlasJetzt[i] + 500) {
             Serial.println("Glas wurde akzeptiert!");
             Leerlauftimer = millis();
-            LedStreifen.setPixelColor(i, LedStreifen.Color(255, 0, 0));                                     // Streifen rot
-            LedStreifen.show();                                                                             // Pixel schalten
-            Timer = millis();                                                                               // Timer Starten
-            GlasDefinitionen[i] = 1;                                                                        // Neuer Status wird gesetzt
+            LedStreifen.setPixelColor(i, LedStreifen.Color(255, 0, 0));                                   // Streifen rot
+            LedStreifen.show();                                                                           // Pixel schalten
+            Timer = millis();                                                                             // Timer Starten
+            GlasDefinitionen[i] = 1;                                                                      // Neuer Status wird gesetzt
           }
           break;
 
@@ -164,16 +164,16 @@ void Check(){                                                                   
         case 6:                                                                                           // 6 = Glas ist voll, licht ist bereits grün... Nichts machen!
           break;
       }
-    } else if (digitalRead(PinKontaktGlas[i])) {                                             // Kein Glas erkannt, vorher stand hier jedoch eins...
+    } else if (digitalRead(PinKontaktGlas[i])) {                                                          // Kein Glas erkannt, vorher stand hier jedoch eins...
       if(GlasDefinitionen[i] > 0) {
         Leerlauftimer = millis();
         GlasDefinitionen[i] = 0;
-        GlasJetzt[i] = 0;                                                                            // Status auf 0 setzen
-        LedStreifen.setPixelColor(i, LedStreifen.Color(0, 0, 0));                                           // LEDs definieren
-        LedStreifen.show();                                                                                 // und schalten (aus)
-        BlaulichtAnforderung = 0;                                                                           // Variable zurücksetzen
-        Schritt = 1;                                                                                        // Schritt wieder auf 1 setzen (Leiter hoch)
-        digitalWrite(PinIN1, LOW);                                                                          // Pumpe aus
+        GlasJetzt[i] = 0;                                                                                 // Status auf 0 setzen
+        LedStreifen.setPixelColor(i, LedStreifen.Color(0, 0, 0));                                         // LEDs definieren
+        LedStreifen.show();                                                                               // und schalten (aus)
+        BlaulichtAnforderung = 0;                                                                         // Variable zurücksetzen
+        Schritt = 1;                                                                                      // Schritt wieder auf 1 setzen (Leiter hoch)
+        digitalWrite(PinIN1, LOW);                                                                        // Pumpe aus
         PumpeIstAn = 0;
       }else {
         GlasJetzt[i] = 0;
@@ -188,7 +188,7 @@ void Check(){                                                                   
 //--------------------------------------------------------------------------------FUNKTION TANKEN--------------------------------------------------------------------------------
 void Tanken() {
   int x = ((WinkelGlas - WinkelErstesGlas) / SchwenkWinkelProGlas);                                       // Der Winkel des Leiterdrehkranzes gibt an welches Glas betankt werden soll (0-5)
-  if (x < (sizeof(PinKontaktGlas))) {                                                                 // Hier wird kontrolliert ob es diesen Wert in derm Array noch gibt.
+  if (x < (sizeof(PinKontaktGlas))) {                                                                     // Hier wird kontrolliert ob es diesen Wert in derm Array noch gibt.
     int LiveZustand = digitalRead(PinKontaktGlas[x]);                                                     // Kontakt auslesen und Wert in Variable schreiben
     if (LiveZustand == 0 && GlasDefinitionen[x] == 2 && (InArbeit == 0 || InArbeit == x)) {               // Wenn ein Glas erkannt wird UND das Glas befüllt werden soll (Status 2) UND die Variable InArbeit "0" ODER "die Nummer des Feldes" hat DANN weiter
       if (InArbeit == 0) {                                                                                // Die Servos sollen sich bewegen. Wenn InArbeit = 0 dann
@@ -281,7 +281,7 @@ void Leerlaufcheck() {
 
 //--------------------------------------------------------------------------------FUNKTION LEITERBEWEGEN--------------------------------------------------------------------------------
 int LeiterBewegen (int Soll, unsigned long Verzoegerung) {                                                // Funktion zum bewegen der Leiter
-  if (ServoWinkelLeiter < Soll && LeiterTimer + Verzoegerung < millis() && !PumpeIstAn) {             // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
+  if (ServoWinkelLeiter < Soll && LeiterTimer + Verzoegerung < millis() && !PumpeIstAn) {                 // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
     ServoWinkelLeiter++;                                                                                  // IstWinkel um 1 erhöhen
     ServoLeiter.write(ServoWinkelLeiter);                                                                 // auf Wert drehen
     LeiterTimer = millis();                                                                               // Timer für Wartezeit neu starten
