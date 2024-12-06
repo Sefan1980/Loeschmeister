@@ -35,14 +35,14 @@ int PumpeIstAn = 0;                                                             
 unsigned long PumpenTimer;                                                                                // Merker für Timer der Pumpe
 int PumpenGeschwindigkeit = 175;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
 int PumpenStandardZeit = 6000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
-int PotiWert;
+int PotiWert;                                                                                             // Variable für den Wert des Potis. Zur Regulierung der Pumpzeit.
 
 // Blaulicht
 const int Blaulicht[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};                          // Blitzabfolge
 int ON = 0;                                                                                               // Merker fürs Blaulicht
 int Ein = 0;                                                                                              // Merker fürs Blaulicht
 int Zaehler = 0;                                                                                          // Wird in der Funktion Blitzer benötigt. Dias Array Blaulicht wird damit Stück für Stück abgearbeitet
-int LeerlaufZeit = 1000;                                                                                   // Nach dieser Ruhezeit, in millis(), fährt die Drehleiter in die Ruhestellung zurück
+int LeerlaufZeit = 1000;                                                                                  // Nach dieser Ruhezeit, in millis(), fährt die Drehleiter in die Ruhestellung zurück
 unsigned long Merker = 0;                                                                                 // Merker für die Verzögerung beim Blaulicht (Tempo) - Dieser Variable wird der Wert von millis() übergeben. 
 int BlaulichtAnforderung = 0;                                                                             // 0 = Kein Blaulicht, 1 = Angefordert, 2 = Baulicht durchläuft die Schleife
 unsigned long Leerlauftimer = 0;                                                                          // Merker für die Ruhezeit, nach Ablauf der Zeit fährt die Drehleiter in die Ruhestellung zurück
@@ -55,7 +55,7 @@ Adafruit_NeoPixel LedStreifen(AnzahlLeds, PinLed, NEO_GRB + NEO_KHZ800);        
 
 // Sonstige Variablen
 unsigned long GlasJetzt[] = {0, 0, 0, 0, 0, 0};
-int GlasDefinitionen[] = {0, 0, 0, 0, 0, 0};                                                                   // 6 Werte für 6 Gläser - Hier werden die Zustände definiert
+int GlasDefinitionen[] = {0, 0, 0, 0, 0, 0};                                                              // 6 Werte für 6 Gläser - Hier werden die Zustände definiert
 int Schritt = 1;                                                                                          // Diese Variable steuert die Bewegungsabläufe der Servos (Leiter hoch(1), Drehen(2), Leiter runter(3))
 int InArbeit = 0;                                                                                         // Diese Variable sorgt dafür dass erst ein Glas befüllt wird, dann das Nächste
 unsigned long Timer = 0;                                                                                  // Dieser Variable wird der Wert von millis() übergeben - für die Wartezeit bevor das Glas befüllt wird
@@ -93,12 +93,6 @@ void setup() {
   LedStreifen.setBrightness(LedHelligkeit);                                                               // Helligkeit setzen
   LedStreifen.show();                                                                                     // Daten an Streifen übergeben (in diesem Fall: Streifen ausschalten)
   
-  /*
-  Serial.print("Winkelkontrolle: WinkelLetztesGlasVariable = ");Serial.print(WinkelLetztesGlas);Serial.print(", WinkelLetztesGlasBerechnet = ");
-  WinkelLetztesGlas = WinkelErstesGlas + (5 * SchwenkWinkelProGlas);                                      // Falls die Position des letzten GlasWinkels nicht 100%ig ist, wird hier korrigiert
-  Serial.println(WinkelLetztesGlas);
-  */
-
   ServoLeiter.write(ServoWinkelLeiterRuhestellung);                                                       // Servo in Ruhestellung bringen
   ServoDrehkranz.writeMicroseconds(ServoDrehkranzRuhestellung);                                           // Servo in Ruhestellunng bringen
 
@@ -115,8 +109,7 @@ void loop() {
 void Check(){                                                                                             // Livezustände checken und mit gemerkten Zuständen vergleichen. Stati und LEDs nach Situation verändern. 
   
   for (int i = 0; i < sizeof(PinKontaktGlas); i++) {                                                      // Kontaktnummer zum Auslesen festlegen
-    //int LiveZustand = digitalRead(PinKontaktGlas[i]);                                                   // Kontakt auslesen und Wert in Variable schreiben
-    if (!digitalRead(PinKontaktGlas[i])) {                                                                               // 0 = Glas erkannt, 1 = Kein Glas
+    if (!digitalRead(PinKontaktGlas[i])) {                                                                // 0 = Glas erkannt, 1 = Kein Glas
       switch (GlasDefinitionen[i]) {                                                                      // Mit Switch bestimmen
         case 0:                                                                                           // 0 = Vormals wurde kein Glas erkannt, nun steht hier eins! --> Licht rot, Timer starten, Status auf 1 setzen.
           if(!GlasJetzt[i]) {
