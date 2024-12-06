@@ -1,4 +1,4 @@
-#include "Servo.h"
+#include "Servo.h"                                                                                        // Servo Bibliothek einbinden
 #include <Adafruit_NeoPixel.h>                                                                            // 1000uF Kondensator zwischen + und - (5V), 300-500 OHM Widerstand in der Datenleitung!
 
 Servo ServoDrehkranz;                                                                                     // Servo-Objekte anlegen
@@ -21,7 +21,7 @@ int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 990;                    
 int ServoWinkelLeiter;
 int ServoWinkelLeiterRuhestellung = ServoWinkelLeiter = 3;                                                // Winkel in Ruhestellung und IstWinkel (in Grad) bei Start
 byte ServoWinkelLeiterHoch = 50;                                                                          // Leiter angehoben (In Grad)
-byte ServoGeschwingigkeitDrehkranz = 4;                                                                   // Höhere Werte verlangsamen die Servos
+byte ServoGeschwingigkeitDrehkranz = 2;                                                                   // Höhere Werte verlangsamen die Servos
 byte ServoGeschwingigkeitLeiter = 30;                                                                     // Höhere Werte verlangsamen die Servos
 
 // Winkel und Winkelberechnungen
@@ -35,6 +35,7 @@ int PumpeIstAn = 0;                                                             
 unsigned long PumpenTimer;                                                                                // Merker für Timer der Pumpe
 int PumpenGeschwindigkeit = 175;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
 int PumpenStandardZeit = 6000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
+int PotiWert;
 
 // Blaulicht
 const int Blaulicht[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};                          // Blitzabfolge
@@ -61,6 +62,8 @@ unsigned long Timer = 0;                                                        
 unsigned long StandzeitNeuesGlas = 2000;                                                                  // Wie lange muss das Glas dort stehen, bevor es befüllt wird? Angabe in Millisekunden.
 unsigned long LeiterTimer = millis();                                                                     // Merker - Zuständig für die Geschwindigkeit der Servos
 unsigned long DrehkranzTimer = millis();                                                                  // Merker - Zuständig für die Geschwindigkeit der Servos
+boolean DEBUG = true;                                                                                     // Für die Seriellen ausgaben, zur Fehlersuche
+int TEXT = 0;                                                                                             // Variable zur vermeidung 1000-Facher ausgaben in der Debug-Konsole
 
 //--------------------------------------------------------------------------------SETUP--------------------------------------------------------------------------------
 void setup() {
@@ -120,12 +123,18 @@ void Check(){                                                                   
             GlasJetzt[i] = millis();
             Serial.println("MILLIS WURDEN GESETZT!");
           } else if(millis() >= GlasJetzt[i] + 500) {
-            Serial.println("Glas wurde akzeptiert!");
             Leerlauftimer = millis();
             LedStreifen.setPixelColor(i, LedStreifen.Color(255, 0, 0));                                   // Streifen rot
             LedStreifen.show();                                                                           // Pixel schalten
             Timer = millis();                                                                             // Timer Starten
             GlasDefinitionen[i] = 1;                                                                      // Neuer Status wird gesetzt
+
+            if (DEBUG) {
+              Serial.print("Glas "); Serial.print(i+1); Serial.print(" wurde akzeptiert!");Serial.println("Zustand wurde auf 1 gesetzt.");
+              Serial.println("LED-Streifen wurde auf ROT gesetzt.");
+              Serial.println("Timer läuft (Standzeit = 2 sekunden).");
+            }
+
           }
           break;
 
@@ -133,6 +142,9 @@ void Check(){                                                                   
           Leerlauftimer = millis();
           if (Timer + StandzeitNeuesGlas < millis()) {
             GlasDefinitionen[i] = 2;
+            if(DEBUG) {
+              Serial.println("2 Sekunden sind abgelaufen und das Glas steht noch! Zustand auf 2 gesetzt.");
+            }
           }
           break;
 
@@ -140,6 +152,9 @@ void Check(){                                                                   
           Leerlauftimer = millis();                                                                              
           if (BlaulichtAnforderung == 0) {
             BlaulichtAnforderung = 1;
+            if(DEBUG) {
+              Serial.println("Blaulicht wurde eingeschaltet.");
+            }
           }
           break;
 
@@ -147,9 +162,12 @@ void Check(){                                                                   
           PumpenTimer = millis();
           Leerlauftimer = millis();
           GlasDefinitionen[i] = 4;
+          if(DEBUG) {
+            Serial.println("Pumpentimer wurde gesetzt. Zustand auf 4.");
+          }
           break;
 
-        case 4:                                                                                           // 4 =  Pumpe ein- und ausschalten, Status auf 5 setzen (in Funktion Pumpen)
+        case 4:
           Pumpen(i, PumpenStandardZeit);
           Leerlauftimer = millis();
           break;
@@ -159,6 +177,9 @@ void Check(){                                                                   
           LedStreifen.setPixelColor(i, LedStreifen.Color(0, 255, 0));
           LedStreifen.show();
           GlasDefinitionen[i] = 6;
+          if(DEBUG) {
+            Serial.println("Licht wurde grün geschaltet. Zustand auf 6.");
+          }
           break;
         
         case 6:                                                                                           // 6 = Glas ist voll, licht ist bereits grün... Nichts machen!
@@ -175,6 +196,9 @@ void Check(){                                                                   
         Schritt = 1;                                                                                      // Schritt wieder auf 1 setzen (Leiter hoch)
         digitalWrite(PinIN1, LOW);                                                                        // Pumpe aus
         PumpeIstAn = 0;
+        if(DEBUG) {
+          Serial.println("Glas wurde nicht mehr erkannt! --> Zustand = 0. Licht aus. Blaulicht auch. Pumpe aus!");
+        }
       }else {
         GlasJetzt[i] = 0;
       }
@@ -197,14 +221,32 @@ void Tanken() {
       switch (Schritt) {                                                                                  //Schritt 1 = Leiter hoch, 2 = Drehen, 3 = Leiter runter
         case 1:                                                                                           // Leiter hoch
           LeiterBewegen(ServoWinkelLeiterHoch, ServoGeschwingigkeitLeiter);
+          if(DEBUG) {
+            if(TEXT != 2) {
+              Serial.println("Leiterbewegt sich hoch.");
+              TEXT = 2;
+            }
+          }
           break;
         
         case 2:                                                                                           // Drehkranz drehen
           DrehkranzBewegen(WinkelGlas, ServoGeschwingigkeitDrehkranz);
+          if(DEBUG) {
+            if(TEXT != 3) {
+              Serial.println("Drehkranz bewegt sich.");
+              TEXT = 3;
+            }
+          }
           break;
         
         case 3:                                                                                           // Leiter runter
           LeiterBewegen(0, ServoGeschwingigkeitLeiter);
+          if(DEBUG) {
+            if(TEXT != 4) {
+              Serial.println("Leiter bewegt sich runter.");
+              TEXT = 4;
+            }
+          }
           break;
       }
     }
@@ -217,16 +259,27 @@ void Tanken() {
 
 //--------------------------------------------------------------------------------FUNKTION PUMPEN--------------------------------------------------------------------------------
 int Pumpen (int GlasNummer, int Pumpdauer) {
-  int PotiWert = analogRead(PinPoti);                                                                     // Poti auslesen
-  Serial.println(PotiWert);
+  PotiWert = analogRead(PinPoti);                                                                         // Poti auslesen
+  if(DEBUG) {
+    if(TEXT != PotiWert && TEXT != PotiWert +1 && TEXT != PotiWert - 1) {
+      Serial.print("Poti steht auf "); Serial.println(PotiWert);
+      TEXT = PotiWert;
+    }
+  }
   if (PumpenTimer < millis() && PumpeIstAn == 0){
     digitalWrite(PinIN1, HIGH);                                                                           // Pumpe einschalten
     PumpeIstAn = 1;
+    if(DEBUG) {
+      Serial.println("Pumpe ist an!");
+    }
   }
   if (PumpenTimer + Pumpdauer + (PotiWert*4) < millis() && PumpeIstAn == 1) {                             // Nach abgelaufener Zeit (incl. PotiWert)
     digitalWrite(PinIN1, LOW);                                                                            // Pumpe aus
     PumpeIstAn = 0;
     GlasDefinitionen[GlasNummer] = 5;                                                                     // Neuen Status setzen
+    if(DEBUG) {
+      Serial.print("Pumpvorgang abgeschlossen, Pumpe aus! Zustand auf 5.");
+    }
   }
 }
 
@@ -263,6 +316,12 @@ void Blitzer() {
 //--------------------------------------------------------------------------------FUNKTION LEERLAUFCHECK--------------------------------------------------------------------------------
 void Leerlaufcheck() {
   if (Leerlauftimer + LeerlaufZeit < millis() && (ServoMicrosDrehkranz > ServoDrehkranzRuhestellung || ServoWinkelLeiter > ServoWinkelLeiterRuhestellung)) {
+    if(DEBUG) {
+      if(TEXT != 5) {
+        Serial.println("Leiter fährt in Ruheposition!");
+        TEXT = 5;
+      }
+    }
     switch (Schritt) {
       case 1:
         LeiterBewegen(ServoWinkelLeiterHoch, ServoGeschwingigkeitLeiter);
