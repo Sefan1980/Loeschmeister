@@ -1,4 +1,4 @@
-#include "Servo.h"                                                                                        // Servo Bibliothek einbinden
+#include <Servo.h>                                                                                        // Servo Bibliothek einbinden
 #include <Adafruit_NeoPixel.h>                                                                            // 1000uF Kondensator zwischen + und - (5V), 300-500 OHM Widerstand in der Datenleitung!
 
 Servo ServoDrehkranz;                                                                                     // Servo-Objekte anlegen
