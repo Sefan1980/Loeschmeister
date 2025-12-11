@@ -1,3 +1,11 @@
+//
+//                        LOESCHMEISTER ESP32
+//                           vom 06.12.25
+//
+//                         von Stefan Hagel
+//                          golfi54@web.de
+//
+
 //================================================================================
 // BIBLIOTHEKEN EINBINDEN
 //================================================================================
@@ -39,8 +47,8 @@ const int STAGGER_OFFSET = PATTERN_STEPS / 2; // Versatz, damit die LEDs abwechs
 
 // PUMPE (Motortreiber L298N)
 const byte PinENA = 23;     // GPIO 23: Pin für die Geschw. (PWM)
-const byte PinIN1 = 27;     // GPIO 27: IN1 Motortreiber (Richtung)
-const byte PinIN2 = 26;     // GPIO 26: IN2 Motortreiber (Richtung)
+const byte PinIN1 = 22;     // GPIO 27: IN1 Motortreiber (Richtung)
+const byte PinIN2 = 21;     // GPIO 26: IN2 Motortreiber (Richtung)
 
 //================================================================================
 // GLOBALE VARIABLEN (WERDEN GESPEICHERT UND SIND IM WEB ÄNDERBAR)
