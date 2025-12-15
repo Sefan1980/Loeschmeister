@@ -1,373 +1,639 @@
-#include <Servo.h>                                                                                        // Servo Bibliothek einbinden
-#include <Adafruit_NeoPixel.h>                                                                            // 1000uF Kondensator zwischen + und - (5V), 300-500 OHM Widerstand in der Datenleitung!
+/**
+ * PROJEKT: LOESCHMEISTER ESP32
+ * BESCHREIBUNG: Automatischer Getränke-Ausschenker mit Web-Konfiguration.
+ * FUNKTION: Erkennt bis zu 6 Gläser, fährt diese sequenziell an und befüllt sie.
+ * * AKTUELLER STATUS: 
+ * - UI-Verbesserung: Glas-Positionen sind nun durch Rahmen (Fieldsets) visuell gruppiert.
+ * - Speichern (Save) und Testen (Anfahren) leiten nun automatisch zur Konfigurationsseite zurück.
+ */
 
-Servo ServoDrehkranz;                                                                                     // Servo-Objekte anlegen
-Servo ServoLeiter;                                                                                        // Servo-Objekte anlegen
+#include <Adafruit_NeoPixel.h> 
+#include <ESP32Servo.h>        
+#include <WiFi.h>              
+#include <WebServer.h>         
+#include <Preferences.h>       
 
-//Pins
-const byte PinKontaktGlas[] = {2, 3, 4, 5, 6, 7};                                                         // Pins der IR-Kontakte
-const byte PinServoDrehkranz = 47;                                                                        // Servo-Pin Drehkranz
-const byte PinServoLeiter = 45;                                                                           // Servo-Pin Leiter
-const byte PinLed = 51 ;                                                                                  // LED Pin (Neopixel)
-const int PinENA = A10;                                                                                   // EnA-Pin Motortreiber (PWM-Ansteuerung)
-const byte PinIN1 = 29;                                                                                   // Pin IN1 Motortreiber
-const byte PinIN2 = 31;                                                                                   // Pin IN2 Motortreiber
-const int PinPoti = A11;                                                                                  // Pin für Poti zur Füllmenge
+// ===============================================================================
+// 1. HARDWARE-PIN-DEFINITIONEN 
+// ===============================================================================
+#define LED_PIN 18         
+#define SERVO_LIFT_PIN 17   
+#define SERVO_ROTATE_PIN 16 
+#define POTI_PIN 34        
+const int SENSOR_PINS[6] = {32, 33, 25, 26, 27, 14};
+const byte PinENA = 23; 
+const byte PinIN1 = 22; 
+const byte PinIN2 = 21; 
 
+// ===============================================================================
+// 2. KONSTANTEN & EINSTELLUNGEN 
+// ===============================================================================
+const int NUM_GLAS_POSITIONS = 6;
+const int NUM_TOTAL_POSITIONS = 7; 
+const int REST_POSITION_INDEX = 6; 
+const int NUM_PIXELS = 6;
+const unsigned long FADE_UP_DURATION = 1000;  
+const unsigned long DELAY_START_PROCESS = 2000; 
+const unsigned long FADE_OUT_DURATION = 500;  
+const unsigned long FINISH_TIME = 1000;      
+const int BLAULICHT_PATTERN[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};
+const long PULSE_DURATION = 55; 
+const int PATTERN_STEPS = 17;
+const int BASE_BLUE_BRIGHTNESS_MAX = 100;
+const int BASE_BLUE_BRIGHTNESS_MIN = 5;
+const int PULSE_SPEED_MS = 2000;
 
-// Servovariablen für Drehkranz und Leiter
-int ServoDrehkranzRuhestellung;
-int ServoMicrosDrehkranz = ServoDrehkranzRuhestellung = 990;                                              // Istwinkel (in Micros) bei Start und in Ruhestellung
-int ServoWinkelLeiter;
-int ServoWinkelLeiterRuhestellung = ServoWinkelLeiter = 3;                                                // Winkel in Ruhestellung und IstWinkel (in Grad) bei Start
-byte ServoWinkelLeiterHoch = 50;                                                                          // Leiter angehoben (In Grad)
-byte ServoGeschwingigkeitDrehkranz = 2;                                                                   // Höhere Werte verlangsamen die Servos
-byte ServoGeschwingigkeitLeiter = 30;                                                                     // Höhere Werte verlangsamen die Servos
+// ===============================================================================
+// 3. GLOBALE VARIABLEN & STATUS-SPEICHER
+// ===============================================================================
+Preferences preferences; 
+WebServer server(80);    
+const char* ap_ssid = "Loeschmeister_Konfig"; 
+const char* ap_password = "Passwort123"; 
 
-// Winkel und Winkelberechnungen
-int WinkelGlas;
-int WinkelErstesGlas = WinkelGlas = 1270;                                                                 // Position des ersten Glases angeben - Im weiteren Programmablauf gibt diese Variable an, welches Glas (Winkel in Micros) angefahren wird (Funktion Tanken)
-int WinkelLetztesGlas = 2270;                                                                             // Position des letzten Glases
-int SchwenkWinkelProGlas = (WinkelLetztesGlas - WinkelErstesGlas) / (sizeof(PinKontaktGlas) - 1);         // Berechnung für einen gleichmäßigen Schwenkwinkel
+// --- Konfigurationsvariablen (werden aus Flash geladen) ---
+int liftDownMicroSec = 500;
+int liftUpMicroSec = 1500;
+int rotationMicroSecs[NUM_TOTAL_POSITIONS] = {500, 800, 1100, 1400, 1700, 2000, 2300};
+int microSecStep = 5;    
+int stepDelayMs = 15;    
+int restDelayMs = 10000; 
+long minFillingTime = 500;
+long maxFillingTime = 5000;
+int pumpSpeed = 200;
 
-// Pumpe
-int PumpeIstAn = 0;                                                                                       // Merker
-unsigned long PumpenTimer;                                                                                // Merker für Timer der Pumpe
-int PumpenGeschwindigkeit = 175;                                                                          // Mit Werten von 130 bis 255 läuft die Pumpe bei den Tests 
-int PumpenStandardZeit = 6000;                                                                            // Standard laufzeit der Pumpe (kann durch Poti variiert werden)
-int PotiWert;                                                                                             // Variable für den Wert des Potis. Zur Regulierung der Pumpzeit.
+long actualLiftUS;   
+long actualRotateUS; 
 
-// Blaulicht
-const int Blaulicht[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};                          // Blitzabfolge
-int ON = 0;                                                                                               // Merker fürs Blaulicht
-int Ein = 0;                                                                                              // Merker fürs Blaulicht
-int Zaehler = 0;                                                                                          // Wird in der Funktion Blitzer benötigt. Dias Array Blaulicht wird damit Stück für Stück abgearbeitet
-int LeerlaufZeit = 1000;                                                                                  // Nach dieser Ruhezeit, in millis(), fährt die Drehleiter in die Ruhestellung zurück
-unsigned long Merker = 0;                                                                                 // Merker für die Verzögerung beim Blaulicht (Tempo) - Dieser Variable wird der Wert von millis() übergeben. 
-int BlaulichtAnforderung = 0;                                                                             // 0 = Kein Blaulicht, 1 = Angefordert, 2 = Baulicht durchläuft die Schleife
-unsigned long Leerlauftimer = 0;                                                                          // Merker für die Ruhezeit, nach Ablauf der Zeit fährt die Drehleiter in die Ruhestellung zurück
-const unsigned long BlaulichtTempo = 36;                                                                  // Höhere Werte verlangsamen den Blitz
+enum LED_STATE { LED_OFF, LED_ACCEPTED, LED_RED, LED_RED_FADE_OUT, LED_RED_MANUAL_FADE_OUT, LED_BLUE_FLASH, LED_GREEN, LED_GREEN_FADE_OUT, LED_SOFT_RUN };
+enum FILLING_STATE { PROCESS_IDLE, PROCESS_CONFIRMED, PROCESS_LIFT_UP, PROCESS_ROTATE, PROCESS_LIFT_DOWN, PROCESS_PUMP_ON, PROCESS_PUMP_OFF, PROCESS_COMPLETE, PROCESS_RETURN_LIFT_UP, PROCESS_RETURN_ROTATE, PROCESS_RETURN_LIFT_DOWN };
+enum REST_RETURN_STATE { REST_IDLE, REST_LIFT_UP, REST_ROTATE, REST_LIFT_DOWN };
 
-//Neopixel
-const int AnzahlLeds = 6;                                                                                 // Anzahl LEDs
-const int LedHelligkeit = 200;                                                                            // Helligkeit 0-255
-Adafruit_NeoPixel LedStreifen(AnzahlLeds, PinLed, NEO_GRB + NEO_KHZ800);                                  // Objekt LedStreifen anlegen
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
+Servo servoLift;
+Servo servoRotate;
 
-// Sonstige Variablen
-unsigned long GlasJetzt[] = {0, 0, 0, 0, 0, 0};
-int GlasDefinitionen[] = {0, 0, 0, 0, 0, 0};                                                              // 6 Werte für 6 Gläser - Hier werden die Zustände definiert
-int Schritt = 1;                                                                                          // Diese Variable steuert die Bewegungsabläufe der Servos (Leiter hoch(1), Drehen(2), Leiter runter(3))
-int InArbeit = 0;                                                                                         // Diese Variable sorgt dafür dass erst ein Glas befüllt wird, dann das Nächste
-unsigned long Timer = 0;                                                                                  // Dieser Variable wird der Wert von millis() übergeben - für die Wartezeit bevor das Glas befüllt wird
-unsigned long StandzeitNeuesGlas = 2000;                                                                  // Wie lange muss das Glas dort stehen, bevor es befüllt wird? Angabe in Millisekunden.
-unsigned long LeiterTimer = millis();                                                                     // Merker - Zuständig für die Geschwindigkeit der Servos
-unsigned long DrehkranzTimer = millis();                                                                  // Merker - Zuständig für die Geschwindigkeit der Servos
-boolean DEBUG = true;                                                                                     // Für die Seriellen ausgaben, zur Fehlersuche
-int TEXT = 0;                                                                                             // Variable zur vermeidung 1000-Facher ausgaben in der Debug-Konsole
+LED_STATE ledState[NUM_GLAS_POSITIONS] = {LED_OFF};
+FILLING_STATE processState[NUM_GLAS_POSITIONS] = {PROCESS_IDLE};
+unsigned long startTime[NUM_GLAS_POSITIONS] = {0};
 
-//--------------------------------------------------------------------------------SETUP--------------------------------------------------------------------------------
-void setup() {
+int currentProcessingPosition = -1; 
+bool isSystemBusy = false;          
+unsigned long lastActivityTime = 0; 
+unsigned long lastServoStepTime = 0; 
+unsigned long lastPatternChange = 0; 
+int currentPatternIndexA = 0;       
+int currentPatternIndexB = 8;       
+int currentMechanismTargetAngle = -1; 
+REST_RETURN_STATE restState = REST_IDLE; 
+
+unsigned long globalPulseStartTime = 0; 
+int testTargetPosition = -1; 
+
+// ===============================================================================
+// 4. SPEICHER- & WEBSERVER-FUNKTIONEN 
+// ===============================================================================
+void loadConfiguration() {
+  preferences.begin("lox-config", true);
+  liftDownMicroSec = preferences.getUInt("liftDownUS", liftDownMicroSec);
+  liftUpMicroSec = preferences.getUInt("liftUpUS", liftUpMicroSec);
+  stepDelayMs = preferences.getUInt("stepDelay", stepDelayMs);
+  microSecStep = preferences.getUInt("microStep", microSecStep);
+  restDelayMs = preferences.getUInt("restDelay", restDelayMs);
+  pumpSpeed = preferences.getUInt("pumpSpeed", pumpSpeed);
+  minFillingTime = preferences.getUInt("minFill", minFillingTime);
+  maxFillingTime = preferences.getUInt("maxFill", maxFillingTime);
+  for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
+    char key[10]; sprintf(key, "rot%d", i);
+    rotationMicroSecs[i] = preferences.getUInt(key, rotationMicroSecs[i]);
+  }
+  preferences.end();
+}
+
+void saveConfiguration() {
+  preferences.begin("lox-config", false);
+  preferences.putUInt("liftDownUS", liftDownMicroSec);
+  preferences.putUInt("liftUpUS", liftUpMicroSec);
+  preferences.putUInt("stepDelay", stepDelayMs);
+  preferences.putUInt("microStep", microSecStep);
+  preferences.putUInt("restDelay", restDelayMs);
+  preferences.putUInt("pumpSpeed", pumpSpeed);
+  preferences.putUInt("minFill", minFillingTime);
+  preferences.putUInt("maxFill", maxFillingTime);
+  for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
+    char key[10]; sprintf(key, "rot%d", i);
+    preferences.putUInt(key, rotationMicroSecs[i]);
+  }
+  preferences.end();
+}
+
+String generateConfigPage() {
+  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Löschmeister Konfig</title>";
+  // NEUE CSS für Fieldset/Legend
+  html += "<style>body{font-family:sans-serif;padding:20px;background:#f0f0f0;} h1{color:#d32f2f;} .box{background:white;padding:15px;border-radius:8px;margin-bottom:15px;box-shadow:0 2px 5px rgba(0,0,0,0.1);} label{display:inline-block;width:180px;margin-bottom:8px;} input{width:80px;padding:5px;} .test-btn{padding:5px 10px;background:#3f51b5;color:white;text-decoration:none;border-radius:4px;font-size:0.8em;margin-left:10px;}";
+  html += "input[type='submit'] { padding:10px 20px; background:#2e7d32; color:white; border:none; border-radius:5px; cursor:pointer; width:auto; min-width:150px; }";
+  html += "fieldset{border:1px solid #ccc; border-radius:6px; padding:10px 15px; margin-bottom:15px;} legend{font-weight:bold; color:#3f51b5; padding:0 10px;}"; // NEU
+  html += "</style></head><body>";
+  html += "<h1>🚒 Löschmeister Konfiguration</h1><form action='/save' method='post'>";
   
-  ServoDrehkranz.attach(PinServoDrehkranz);                                                               // ServoDrehkranz Pin zuweisen
-  ServoLeiter.attach(PinServoLeiter);                                                                     // ServoLeiter Pin zuweisen
+  html += "<div class='box'><h2>📏 Servo-Einstellungen</h2>";
+  html += "<label>Leiter AB (us):</label><input type='number' name='liftDown' value='" + String(liftDownMicroSec) + "'><br>";
+  html += "<label>Leiter AUF (us):</label><input type='number' name='liftUp' value='" + String(liftUpMicroSec) + "'><br>";
+  html += "<label>Schrittweite (us):</label><input type='number' name='microStep' value='" + String(microSecStep) + "'><br>";
+  html += "<label>Verzögerung (ms):</label><input type='number' name='stepDelay' value='" + String(stepDelayMs) + "'></div>";
 
-  pinMode(PinKontaktGlas[0], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinKontaktGlas[1], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinKontaktGlas[2], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinKontaktGlas[3], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinKontaktGlas[4], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinKontaktGlas[5], INPUT_PULLUP);                                                               // Pin für IR-Kontakt definieren, internen Pullup-Widerstand aktivieren
-  pinMode(PinENA, OUTPUT);                                                                                // Pin für Motorsteuergetät definieren
-  pinMode(PinIN1, OUTPUT);                                                                                // Pin für Motorsteuergetät definieren
-  pinMode(PinIN2, OUTPUT);                                                                                // Pin für Motorsteuergetät definieren
-
-  digitalWrite(PinIN1, LOW);                                                                              // Motorsteuergerät vorbereiten für motor-rechtslauf
-  digitalWrite(PinIN2, LOW);                                                                              // Motorsteuergerät vorbereiten für motor-rechtslauf
-  analogWrite(PinENA, PumpenGeschwindigkeit);                                                             // Pumpengeschwindigkeit setzen
-
+  html += "<div class='box'><h2>📍 Glas-Positionen</h2>";
   
-  Serial.begin(115200);                                                                                   // Wird nur für die serielle Ausgabe benötigt (z.B. beim debuggen)
-  Serial.println("FireFiller - 04.12.2024");                                                              // Datum der Version
-
-  LedStreifen.begin();                                                                                    // Instanz starten
-  LedStreifen.setBrightness(LedHelligkeit);                                                               // Helligkeit setzen
-  LedStreifen.show();                                                                                     // Daten an Streifen übergeben (in diesem Fall: Streifen ausschalten)
+  // Gruppierung für jede Glasposition (0-5)
+  for(int i = 0; i < 6; i++) {
+    html += "<fieldset><legend>Glas " + String(i+1) + " (Position " + String(i) + ")</legend>";
+    html += "<label>Mikrosekunden (us):</label><input type='number' name='rot" + String(i) + "' value='" + String(rotationMicroSecs[i]) + "'>";
+    html += "<a href='/test?pos=" + String(i) + "' class='test-btn' target='_blank'>Anfahren</a>";
+    html += "</fieldset>";
+  }
   
-  ServoLeiter.write(ServoWinkelLeiterRuhestellung);                                                       // Servo in Ruhestellung bringen
-  ServoDrehkranz.writeMicroseconds(ServoDrehkranzRuhestellung);                                           // Servo in Ruhestellunng bringen
+  // Gruppierung für die Ruheposition (6)
+  html += "<fieldset><legend>Ruheposition (Position 6)</legend>";
+  html += "<label>Mikrosekunden (us):</label><input type='number' name='rot6' value='" + String(rotationMicroSecs[6]) + "'>";
+  html += "<a href='/test?pos=6' class='test-btn' target='_blank'>Anfahren</a>";
+  html += "</fieldset></div>"; 
 
-}
-
-//--------------------------------------------------------------------------------LOOP--------------------------------------------------------------------------------
-void loop() {
-  Check();
-  Tanken();
-  Leerlaufcheck();
-}
-
-//--------------------------------------------------------------------------------FUNKTION CHECK--------------------------------------------------------------------------------
-void Check(){                                                                                             // Livezustände checken und mit gemerkten Zuständen vergleichen. Stati und LEDs nach Situation verändern. 
+  html += "<div class='box'><h2>🌀 Pumpe</h2><label>Speed (0-255):</label><input type='number' name='pumpSpeed' value='" + String(pumpSpeed) + "'><br>";
+  html += "<label>Ruherückkehr Wartezeit (ms):</label><input type='number' name='restDelay' value='" + String(restDelayMs) + "'></div>";
   
-  for (int i = 0; i < sizeof(PinKontaktGlas); i++) {                                                      // Kontaktnummer zum Auslesen festlegen
-    if (!digitalRead(PinKontaktGlas[i])) {                                                                // 0 = Glas erkannt, 1 = Kein Glas
-      switch (GlasDefinitionen[i]) {                                                                      // Mit Switch bestimmen
-        case 0:                                                                                           // 0 = Vormals wurde kein Glas erkannt, nun steht hier eins! --> Licht rot, Timer starten, Status auf 1 setzen.
-          if(!GlasJetzt[i]) {
-            GlasJetzt[i] = millis();
-            Serial.println("MILLIS WURDEN GESETZT!");
-          } else if(millis() >= GlasJetzt[i] + 500) {
-            Leerlauftimer = millis();
-            LedStreifen.setPixelColor(i, LedStreifen.Color(255, 0, 0));                                   // Streifen rot
-            LedStreifen.show();                                                                           // Pixel schalten
-            Timer = millis();                                                                             // Timer Starten
-            GlasDefinitionen[i] = 1;                                                                      // Neuer Status wird gesetzt
-
-            if (DEBUG) {
-              Serial.print("Glas "); Serial.print(i+1); Serial.print(" wurde akzeptiert!");Serial.println("Zustand wurde auf 1 gesetzt.");
-              Serial.println("LED-Streifen wurde auf ROT gesetzt.");
-              Serial.println("Timer läuft (Standzeit = 2 sekunden).");
-            }
-
-          }
-          break;
-
-        case 1:                                                                                           // 1 = Glas steht noch. Timer abwarten -->dann Status auf 2 setzen
-          Leerlauftimer = millis();
-          if (Timer + StandzeitNeuesGlas < millis()) {
-            GlasDefinitionen[i] = 2;
-            if(DEBUG) {
-              Serial.println("2 Sekunden sind abgelaufen und das Glas steht noch! Zustand auf 2 gesetzt.");
-            }
-          }
-          break;
-
-        case 2:                                                                                           // 2 = Blaulicht an. Funktion Tanken steuert die Servos und dann wird der Status auf 3
-          Leerlauftimer = millis();                                                                              
-          if (BlaulichtAnforderung == 0) {
-            BlaulichtAnforderung = 1;
-            if(DEBUG) {
-              Serial.println("Blaulicht wurde eingeschaltet.");
-            }
-          }
-          break;
-
-        case 3:                                                                                           // 3 = Timer starten, Status 4 setzen
-          PumpenTimer = millis();
-          Leerlauftimer = millis();
-          GlasDefinitionen[i] = 4;
-          if(DEBUG) {
-            Serial.println("Pumpentimer wurde gesetzt. Zustand auf 4.");
-          }
-          break;
-
-        case 4:
-          Pumpen(i, PumpenStandardZeit);
-          Leerlauftimer = millis();
-          break;
-
-        case 5:                                                                                           // 5 = Glas ist voll! Blaulicht abschalten und Licht grün. Status auf 4 setzen.
-          BlaulichtAnforderung = 0;
-          LedStreifen.setPixelColor(i, LedStreifen.Color(0, 255, 0));
-          LedStreifen.show();
-          GlasDefinitionen[i] = 6;
-          if(DEBUG) {
-            Serial.println("Licht wurde grün geschaltet. Zustand auf 6.");
-          }
-          break;
-        
-        case 6:                                                                                           // 6 = Glas ist voll, licht ist bereits grün... Nichts machen!
-          break;
-      }
-    } else if (digitalRead(PinKontaktGlas[i])) {                                                          // Kein Glas erkannt, vorher stand hier jedoch eins...
-      if(GlasDefinitionen[i] > 0) {
-        Leerlauftimer = millis();
-        GlasDefinitionen[i] = 0;
-        GlasJetzt[i] = 0;                                                                                 // Status auf 0 setzen
-        LedStreifen.setPixelColor(i, LedStreifen.Color(0, 0, 0));                                         // LEDs definieren
-        LedStreifen.show();                                                                               // und schalten (aus)
-        BlaulichtAnforderung = 0;                                                                         // Variable zurücksetzen
-        Schritt = 1;                                                                                      // Schritt wieder auf 1 setzen (Leiter hoch)
-        digitalWrite(PinIN1, LOW);                                                                        // Pumpe aus
-        PumpeIstAn = 0;
-        if(DEBUG) {
-          Serial.println("Glas wurde nicht mehr erkannt! --> Zustand = 0. Licht aus. Blaulicht auch. Pumpe aus!");
-        }
-      }else {
-        GlasJetzt[i] = 0;
-      }
-    }
-  }
-  Blitzer();
+  html += "<input type='submit' value='💾 Alles Speichern'>";
+  html += "</form></body></html>";
+  return html;
 }
 
-
-
-//--------------------------------------------------------------------------------FUNKTION TANKEN--------------------------------------------------------------------------------
-void Tanken() {
-  int x = ((WinkelGlas - WinkelErstesGlas) / SchwenkWinkelProGlas);                                       // Der Winkel des Leiterdrehkranzes gibt an welches Glas betankt werden soll (0-5)
-  if (x < (sizeof(PinKontaktGlas))) {                                                                     // Hier wird kontrolliert ob es diesen Wert in derm Array noch gibt.
-    int LiveZustand = digitalRead(PinKontaktGlas[x]);                                                     // Kontakt auslesen und Wert in Variable schreiben
-    if (LiveZustand == 0 && GlasDefinitionen[x] == 2 && (InArbeit == 0 || InArbeit == x)) {               // Wenn ein Glas erkannt wird UND das Glas befüllt werden soll (Status 2) UND die Variable InArbeit "0" ODER "die Nummer des Feldes" hat DANN weiter
-      if (InArbeit == 0) {                                                                                // Die Servos sollen sich bewegen. Wenn InArbeit = 0 dann
-        InArbeit = x;                                                                                     // muss InArbeit die nummer des Glases erhalten um die Bewegungen für dieses Glas komplett abzuarbeiten
-      }
-      switch (Schritt) {                                                                                  //Schritt 1 = Leiter hoch, 2 = Drehen, 3 = Leiter runter
-        case 1:                                                                                           // Leiter hoch
-          LeiterBewegen(ServoWinkelLeiterHoch, ServoGeschwingigkeitLeiter);
-          if(DEBUG) {
-            if(TEXT != 2) {
-              Serial.println("Leiterbewegt sich hoch.");
-              TEXT = 2;
-            }
-          }
-          break;
-        
-        case 2:                                                                                           // Drehkranz drehen
-          DrehkranzBewegen(WinkelGlas, ServoGeschwingigkeitDrehkranz);
-          if(DEBUG) {
-            if(TEXT != 3) {
-              Serial.println("Drehkranz bewegt sich.");
-              TEXT = 3;
-            }
-          }
-          break;
-        
-        case 3:                                                                                           // Leiter runter
-          LeiterBewegen(0, ServoGeschwingigkeitLeiter);
-          if(DEBUG) {
-            if(TEXT != 4) {
-              Serial.println("Leiter bewegt sich runter.");
-              TEXT = 4;
-            }
-          }
-          break;
-      }
-    }
-  }                          
-  WinkelGlas += SchwenkWinkelProGlas;                                                                     // Schwenkwinkel um ein Glas erhöhen
-    if (WinkelGlas > WinkelLetztesGlas) {                                                                 // Wenn SollWinkel größer als WinkelLetztesGlas
-    WinkelGlas = WinkelErstesGlas;                                                                        // Winkel wieder auf erstes Glas zurücksetzen
+void handleSave() {
+  if (server.hasArg("liftDown")) liftDownMicroSec = server.arg("liftDown").toInt();
+  if (server.hasArg("liftUp")) liftUpMicroSec = server.arg("liftUp").toInt();
+  if (server.hasArg("stepDelay")) stepDelayMs = server.arg("stepDelay").toInt();
+  if (server.hasArg("microStep")) microSecStep = server.arg("microStep").toInt();
+  if (server.hasArg("pumpSpeed")) pumpSpeed = server.arg("pumpSpeed").toInt();
+  if (server.hasArg("restDelay")) restDelayMs = server.arg("restDelay").toInt();
+  
+  for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
+    char arg[10]; sprintf(arg, "rot%d", i);
+    if (server.hasArg(arg)) rotationMicroSecs[i] = server.arg(arg).toInt();
   }
+  
+  saveConfiguration();
+  
+  String response = "Die Werte wurden gespeichert. Bitte starten Sie den ESP32 neu, um sie zu aktivieren.";
+  
+  server.sendHeader("Location", "/", true);
+  server.send(302, "text/plain", response);
 }
 
-//--------------------------------------------------------------------------------FUNKTION PUMPEN--------------------------------------------------------------------------------
-int Pumpen (int GlasNummer, int Pumpdauer) {
-  PotiWert = analogRead(PinPoti);                                                                         // Poti auslesen
-  if(DEBUG) {
-    if(TEXT != PotiWert && TEXT != PotiWert +1 && TEXT != PotiWert - 1) {
-      Serial.print("Poti steht auf "); Serial.println(PotiWert);
-      TEXT = PotiWert;
+void handleTestMove() {
+  if (server.hasArg("pos")) {
+    int p = server.arg("pos").toInt();
+    if (p >= 0 && p < NUM_TOTAL_POSITIONS) {
+      
+      isSystemBusy = true; 
+      currentProcessingPosition = -1; 
+      testTargetPosition = p; 
+      currentMechanismTargetAngle = rotationMicroSecs[p]; 
+      
+      if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
+      if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+
+      actualLiftUS = liftDownMicroSec; 
+      restState = REST_LIFT_UP; 
+      
+      server.sendHeader("Location", "/", true);
+      server.send(302, "text/plain", "Weiterleitung zur Konfigurationsseite.");
+      
+      return;
     }
   }
-  if (PumpenTimer < millis() && PumpeIstAn == 0){
-    digitalWrite(PinIN1, HIGH);                                                                           // Pumpe einschalten
-    PumpeIstAn = 1;
-    if(DEBUG) {
-      Serial.println("Pumpe ist an!");
-    }
-  }
-  if (PumpenTimer + Pumpdauer + (PotiWert*4) < millis() && PumpeIstAn == 1) {                             // Nach abgelaufener Zeit (incl. PotiWert)
-    digitalWrite(PinIN1, LOW);                                                                            // Pumpe aus
-    PumpeIstAn = 0;
-    GlasDefinitionen[GlasNummer] = 5;                                                                     // Neuen Status setzen
-    if(DEBUG) {
-      Serial.print("Pumpvorgang abgeschlossen, Pumpe aus! Zustand auf 5.");
-    }
-  }
+  server.send(400, "text/plain", "Fehler: Ungültige Position (0-6).");
 }
 
-//--------------------------------------------------------------------------------FUNKTION BLITZER--------------------------------------------------------------------------------
-void Blitzer() {
-  if (BlaulichtAnforderung == 1){                                                                         // Wenn Blaulichtanforderung = 1 ist, soll der Blitzer laufen und die Servos angesteuert werden.
-    Merker = millis();                                                                                    // Merker setzen
-    Zaehler = 0;                                                                                          // Variable zum Auslesen der Blitzabfolge
-    BlaulichtAnforderung = 2;                                                                             // Blaulichtanforderung auf 2 setzen, sonst startet der Timer bei jedem durchgang wieder von vorne.
+// ===============================================================================
+// 5. KERN-LOGIK: BEWEGUNG & SENSOREN
+// ===============================================================================
+
+// Funktion zur sanften, schrittweisen Servobewegung
+bool moveServoGradually(Servo &servo, long &actualValue, long targetValue, unsigned long currentMillis) {
+  if (actualValue == targetValue) return true;
+  
+  if (currentMillis - lastServoStepTime >= (unsigned long)stepDelayMs) {
+    lastServoStepTime = currentMillis;
+    
+    if (actualValue < targetValue) actualValue += microSecStep;
+    else actualValue -= microSecStep;
+    
+    if (abs(targetValue - actualValue) < microSecStep) actualValue = targetValue;
+    
+    servo.writeMicroseconds(actualValue);
   }
-  if(BlaulichtAnforderung == 2  && millis() >= (Merker + BlaulichtTempo)) {                               // Erst ausführen wenn der Timer abgelaufen ist
-    for (int h = 0; h < sizeof(PinKontaktGlas); h++) {
-      if (GlasDefinitionen[h] > 1 && GlasDefinitionen[h] < 5 && Blaulicht[Zaehler] == 1 && Ein == 0) {
-        LedStreifen.setPixelColor(h, LedStreifen.Color(0, 0, 255));
-        ON = 1;
+  return (actualValue == targetValue);
+}
+
+// Überwacht die Glas-Sensoren und steuert die LED-Farben
+void handleSensorLogic(int pos, unsigned long currentMillis) {
+  bool isPresent = (digitalRead(SENSOR_PINS[pos]) == LOW);
+  
+  bool isWaitingForService = (ledState[pos] == LED_ACCEPTED || ledState[pos] == LED_RED || ledState[pos] == LED_RED_FADE_OUT || ledState[pos] == LED_BLUE_FLASH);
+  
+  bool removedDuringWait = !isPresent && isWaitingForService; 
+  
+  // Zustandswechsel: Grün -> Ausfaden (entfernt)
+  if (!isPresent && ledState[pos] == LED_GREEN) {
+      ledState[pos] = LED_GREEN_FADE_OUT; 
+      startTime[pos] = currentMillis;
+  }
+  
+  // Zustandswechsel: Fade Out Ende -> Blau Pulsieren
+  if ((ledState[pos] == LED_GREEN_FADE_OUT || ledState[pos] == LED_RED_MANUAL_FADE_OUT) && currentMillis - startTime[pos] >= FADE_OUT_DURATION) {
+      ledState[pos] = LED_SOFT_RUN; 
+  }
+  
+  // Zustandswechsel: Blau Pulsieren -> Rot/Füllen (Glas erkannt)
+  if ((ledState[pos] == LED_SOFT_RUN || ledState[pos] == LED_OFF) && isPresent) { 
+      ledState[pos] = LED_ACCEPTED; 
+      startTime[pos] = currentMillis; 
+  }
+
+  // --- GLAS ENTFERNT (Während es auf Bedienung wartete) ---
+  if (removedDuringWait) {
+    if (processState[pos] == PROCESS_PUMP_ON) ledcWrite(PinENA, 0);
+    
+    ledState[pos] = LED_RED_MANUAL_FADE_OUT; 
+    startTime[pos] = currentMillis; 
+    
+    if (currentProcessingPosition == pos) {
+      isSystemBusy = true;
+      currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+      processState[pos] = PROCESS_RETURN_LIFT_UP;
+    } else {
+      processState[pos] = PROCESS_IDLE;
+    }
+    lastActivityTime = currentMillis;
+    return;
+  }
+  // ---------------------------------------------------
+
+  // Ablauf der Glas-Erkennung (Farben-Logik)
+  switch (ledState[pos]) {
+    case LED_ACCEPTED: 
+      if (currentMillis - startTime[pos] >= FADE_UP_DURATION) { 
+        ledState[pos] = LED_RED; 
+        startTime[pos] = currentMillis; 
       } 
-      if (GlasDefinitionen[h] > 1 && GlasDefinitionen[h] < 5 && Blaulicht[Zaehler] == 0 && Ein == 1) {    // Wenn Blaulicht[i] = 0 dann Licht ausschalten und Merken dass es aus ist
-        LedStreifen.setPixelColor(h, LedStreifen.Color(0, 0, 0));
-        ON = 0;
+      break;
+    case LED_RED: 
+      if (currentMillis - startTime[pos] >= DELAY_START_PROCESS) { 
+        ledState[pos] = LED_RED_FADE_OUT; 
+        startTime[pos] = currentMillis; 
+      } 
+      break;
+    case LED_RED_FADE_OUT:
+      if (currentMillis - startTime[pos] >= FADE_OUT_DURATION) {
+        ledState[pos] = LED_BLUE_FLASH;
+        processState[pos] = PROCESS_CONFIRMED; 
+      }
+      break;
+    default: break;
+  }
+}
+
+// Steuert den Füllprozess
+void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDuration) {
+  if (pos != currentProcessingPosition) return;
+
+  switch (processState[pos]) {
+    case PROCESS_CONFIRMED:
+      if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
+      if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+      processState[pos] = PROCESS_LIFT_UP;
+      break;
+
+    case PROCESS_LIFT_UP:
+      if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) processState[pos] = PROCESS_ROTATE;
+      break;
+
+    case PROCESS_ROTATE:
+      if (moveServoGradually(servoRotate, actualRotateUS, rotationMicroSecs[pos], currentMillis)) processState[pos] = PROCESS_LIFT_DOWN;
+      break;
+
+    case PROCESS_LIFT_DOWN:
+      if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, currentMillis)) {
+        processState[pos] = PROCESS_PUMP_ON;
+        digitalWrite(PinIN1, HIGH); digitalWrite(PinIN2, LOW);
+        ledcWrite(PinENA, pumpSpeed);
+        startTime[pos] = currentMillis;
+      }
+      break;
+
+    case PROCESS_PUMP_ON:
+      if (currentMillis - startTime[pos] >= (unsigned long)fillingDuration) {
+        ledcWrite(PinENA, 0);
+        ledState[pos] = LED_GREEN; 
+        processState[pos] = PROCESS_PUMP_OFF;
+        startTime[pos] = currentMillis; 
+      }
+      break;
+
+    case PROCESS_PUMP_OFF:
+      if (currentMillis - startTime[pos] >= FINISH_TIME) {
+        int next = -1;
+        for (int i = 0; i < 6; i++) { if (processState[i] == PROCESS_CONFIRMED) { next = i; break; } }
+        
+        if (next != -1) {
+          currentMechanismTargetAngle = rotationMicroSecs[next];
+          currentProcessingPosition = next;
+        } else {
+          currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+        }
+        processState[pos] = PROCESS_RETURN_LIFT_UP;
+      }
+      break;
+
+    case PROCESS_RETURN_LIFT_UP:
+      if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) processState[pos] = PROCESS_RETURN_ROTATE;
+      break;
+
+    case PROCESS_RETURN_ROTATE:
+      if (moveServoGradually(servoRotate, actualRotateUS, currentMechanismTargetAngle, currentMillis)) {
+        if (currentMechanismTargetAngle == rotationMicroSecs[REST_POSITION_INDEX]) {
+          processState[pos] = PROCESS_RETURN_LIFT_DOWN;
+        } else {
+          processState[pos] = PROCESS_COMPLETE;
+          processState[currentProcessingPosition] = PROCESS_LIFT_DOWN;
+        }
+      }
+      break;
+
+    case PROCESS_RETURN_LIFT_DOWN:
+      if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, currentMillis)) {
+        processState[pos] = PROCESS_COMPLETE;
+        isSystemBusy = false;
+        currentProcessingPosition = -1;
+        
+        servoLift.detach();
+        servoRotate.detach();
+      }
+      break;
+
+    default: break;
+  }
+}
+
+// Handhabt nun sowohl den Ruhe-Timeout als auch die Testbewegungen
+void handleRestingTimeout(unsigned long currentMillis) {
+  // Wenn ein Füllprozess aktiv ist, nicht eingreifen
+  if (currentProcessingPosition != -1) return;
+
+  // 1. Logik: Automatischer Ruhe-Timeout
+  // Nur aktiv, wenn KEIN Test läuft.
+  if (testTargetPosition == -1) { 
+    if (restState == REST_IDLE && !isSystemBusy) {
+      // Prüfe, ob wir nicht bereits in der Ruheposition sind
+      if (actualLiftUS != liftDownMicroSec || actualRotateUS != rotationMicroSecs[REST_POSITION_INDEX]) {
+        if (currentMillis - lastActivityTime >= (unsigned long)restDelayMs) {
+          if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
+          if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+          currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+          restState = REST_LIFT_UP;
+        }
       }
     }
-    if ((Ein == 0 && ON == 1) || (Ein == 1 && ON == 0)) {                                                 // Wenn neue Befehle warten, dann 
-    LedStreifen.show();                                                                                   // Licht schalten
-    }
-    Ein = ON;
-    Merker = millis();                                                                                    // Timer zurücksetzen
-    Zaehler++;                                                                                            // Zähler erhöhen
-    if (Zaehler > sizeof(Blaulicht) / 2) {                                                                // Wenn Zähler zu groß wird
-      Zaehler = 0;                                                                                        // Zähler zurücksetzen
+  }
+
+  // 2. Abarbeitung der Servo-Bewegung (gilt für Setup, Timeout und Testmodus)
+  if (restState != REST_IDLE) {
+      
+      unsigned long stepTime = currentMillis; 
+
+      switch (restState) {
+          case REST_LIFT_UP: 
+              if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, stepTime)) restState = REST_ROTATE; 
+              break;
+          case REST_ROTATE: 
+              if (moveServoGradually(servoRotate, actualRotateUS, currentMechanismTargetAngle, stepTime)) restState = REST_LIFT_DOWN; 
+              break;
+          case REST_LIFT_DOWN: 
+              if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, stepTime)) { 
+                  restState = REST_IDLE; 
+                  servoLift.detach(); servoRotate.detach();
+                  
+                  // Reset der Testvariablen und des Busy-Zustands, wenn es ein Test war
+                  if (testTargetPosition != -1) {
+                      isSystemBusy = false;
+                      testTargetPosition = -1;
+                  }
+                  lastActivityTime = currentMillis; // Wichtig: Setze die Aktivitätszeit zurück, um den nächsten Timeout zu starten
+              } 
+              break;
+          default: break;
+      }
+  }
+}
+
+// Stellt sicher, dass LEDs im Ruhezustand auf Blau Pulsieren gesetzt werden
+void handleRestingLED(unsigned long currentMillis) {
+  if (globalPulseStartTime == 0) {
+      globalPulseStartTime = currentMillis;
+  }
+
+  for(int i = 0; i < NUM_GLAS_POSITIONS; i++) {
+    if (ledState[i] == LED_OFF) {
+        ledState[i] = LED_SOFT_RUN;
     }
   }
 }
 
-//--------------------------------------------------------------------------------FUNKTION LEERLAUFCHECK--------------------------------------------------------------------------------
-void Leerlaufcheck() {
-  if (Leerlauftimer + LeerlaufZeit < millis() && (ServoMicrosDrehkranz > ServoDrehkranzRuhestellung || ServoWinkelLeiter > ServoWinkelLeiterRuhestellung)) {
-    if(DEBUG) {
-      if(TEXT != 5) {
-        Serial.println("Leiter fährt in Ruheposition!");
-        TEXT = 5;
+// Berechnet den Blauen Puls-Faktor synchron für alle LEDs
+int calculatePulsingBlue(unsigned long currentMillis) {
+    unsigned long elapsed = currentMillis - globalPulseStartTime;
+    
+    float frequency = 2.0 * PI / (float)PULSE_SPEED_MS;
+    float cosValue = cos((float)elapsed * frequency);
+    float waveValue = -cosValue; 
+    float pulseFactor = (waveValue + 1.0) / 2.0; 
+    
+    int span = BASE_BLUE_BRIGHTNESS_MAX - BASE_BLUE_BRIGHTNESS_MIN;
+    
+    return (int)(BASE_BLUE_BRIGHTNESS_MIN + pulseFactor * span);
+}
+
+
+// Zeichnet die LED-Farben basierend auf dem Status
+void updateNeoPixels(unsigned long currentMillis) {
+  
+  for (int i = 0; i < 6; i++) {
+    uint32_t color = strip.Color(0,0,0);
+    
+    switch (ledState[i]) {
+        case LED_SOFT_RUN: { 
+            int B = calculatePulsingBlue(currentMillis); 
+            color = strip.Color(0, 0, B);
+            break;
+        }
+        case LED_ACCEPTED: {
+            unsigned long elapsed = currentMillis - startTime[i];
+            
+            int R_brightness;
+            R_brightness = map(elapsed, 0, FADE_UP_DURATION, 0, 255);
+            R_brightness = constrain(R_brightness, 0, 255);
+            
+            int B_fade;
+            B_fade = map(elapsed, 0, FADE_UP_DURATION, BASE_BLUE_BRIGHTNESS_MAX, 0);
+            B_fade = constrain(B_fade, 0, 255); 
+            
+            color = strip.Color(R_brightness, 0, B_fade);
+            break;
+        }
+        case LED_RED: 
+            color = strip.Color(255, 0, 0);
+            break;
+            
+        case LED_RED_FADE_OUT: {
+            unsigned long elapsed = currentMillis - startTime[i];
+            
+            int R_fade;
+            R_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
+            R_fade = constrain(R_fade, 0, 255);
+            
+            int B_fade; 
+            B_fade = map(elapsed, 0, FADE_OUT_DURATION, 0, 255);
+            B_fade = constrain(B_fade, 0, 255); 
+            
+            color = strip.Color(R_fade, 0, B_fade);
+            break;
+        }
+        
+        case LED_RED_MANUAL_FADE_OUT: {
+            unsigned long elapsed = currentMillis - startTime[i];
+            
+            int R_fade;
+            R_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
+            R_fade = constrain(R_fade, 0, 255);
+            
+            color = strip.Color(R_fade, 0, 0);
+            break;
+        }
+            
+        case LED_GREEN: {
+            unsigned long elapsed = currentMillis - startTime[i];
+            int G_brightness;
+            G_brightness = map(elapsed, 0, FINISH_TIME, 0, 255);
+            G_brightness = constrain(G_brightness, 0, 255);
+            color = strip.Color(0, G_brightness, 0);
+            break;
+        }
+        
+        case LED_GREEN_FADE_OUT: {
+            unsigned long elapsed = currentMillis - startTime[i];
+            
+            int G_fade;
+            G_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
+            G_fade = constrain(G_fade, 0, 255);
+            
+            color = strip.Color(0, G_fade, 0);
+            break;
+        }
+        
+        case LED_BLUE_FLASH: {
+            int idx = (i % 2 == 0) ? currentPatternIndexA : currentPatternIndexB;
+            if (BLAULICHT_PATTERN[idx] == 1) color = strip.Color(0, 0, 255);
+            break;
+        }
+        case LED_OFF:
+        default:
+            color = strip.Color(0, 0, 0);
+            break;
+    }
+    
+    strip.setPixelColor(i, color);
+  }
+  strip.show();
+}
+
+void handleBlueFlashTimer(unsigned long currentMillis) {
+  if (currentMillis - lastPatternChange >= PULSE_DURATION) {
+    lastPatternChange = currentMillis;
+    currentPatternIndexA = (currentPatternIndexA + 1) % PATTERN_STEPS;
+    currentPatternIndexB = (currentPatternIndexB + 1) % PATTERN_STEPS;
+  }
+}
+
+// ===============================================================================
+// 6. HAUPTPROGRAMM (SETUP & LOOP) 
+// ===============================================================================
+
+void setup() {
+  Serial.begin(115200);
+  loadConfiguration();
+
+  // WLAN Access Point starten
+  WiFi.softAP(ap_ssid, ap_password, 6, 0, 1);
+  server.on("/", [](){ server.send(200, "text/html", generateConfigPage()); });
+  server.on("/save", handleSave);
+  server.on("/test", handleTestMove);
+  server.begin();
+
+  // Hardware Pins konfigurieren
+  for (int i = 0; i < 6; i++) pinMode(SENSOR_PINS[i], INPUT_PULLUP);
+  pinMode(POTI_PIN, INPUT);
+  ledcAttach(PinENA, 5000, 8);
+  pinMode(PinIN1, OUTPUT); pinMode(PinIN2, OUTPUT);
+  digitalWrite(PinIN1, LOW); digitalWrite(PinIN2, LOW);
+
+  strip.begin(); strip.show();
+  ESP32PWM::allocateTimer(1);
+  
+  // Servos anbinden
+  servoLift.attach(SERVO_LIFT_PIN); 
+  servoRotate.attach(SERVO_ROTATE_PIN);
+  
+  // Startwerte für Ist-Position setzen 
+  actualLiftUS = liftDownMicroSec; 
+  actualRotateUS = rotationMicroSecs[REST_POSITION_INDEX];
+
+  // Sanftes Anfahren der Ruheposition im Setup mit LIFT_UP starten
+  currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+  restState = REST_LIFT_UP; 
+  
+  lastActivityTime = millis();
+  globalPulseStartTime = millis(); 
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+  server.handleClient();
+  handleBlueFlashTimer(currentMillis);
+  
+  handleRestingLED(currentMillis);
+  
+  long dur = map(analogRead(POTI_PIN), 0, 4095, minFillingTime, maxFillingTime);
+
+  // 1. Alle Sensoren prüfen
+  for (int i = 0; i < 6; i++) handleSensorLogic(i, currentMillis);
+
+  // 2. Prüfen, ob ein neues Glas bedient werden muss
+  if (!isSystemBusy && testTargetPosition == -1) { // Nur starten, wenn nicht im Testmodus
+    for (int i = 0; i < 6; i++) {
+      if (ledState[i] == LED_BLUE_FLASH && processState[i] == PROCESS_CONFIRMED) {
+        currentProcessingPosition = i; 
+        isSystemBusy = true; 
+        break;
       }
     }
-    switch (Schritt) {
-      case 1:
-        LeiterBewegen(ServoWinkelLeiterHoch, ServoGeschwingigkeitLeiter);
-        break;
-        
-      case 2:
-        DrehkranzBewegen(ServoDrehkranzRuhestellung, ServoGeschwingigkeitDrehkranz);
-        break;
-        
-      case 3:
-        LeiterBewegen(ServoWinkelLeiterRuhestellung, ServoGeschwingigkeitLeiter);
-        break;
-    }
   }
-}
 
-//--------------------------------------------------------------------------------FUNKTION LEITERBEWEGEN--------------------------------------------------------------------------------
-int LeiterBewegen (int Soll, unsigned long Verzoegerung) {                                                // Funktion zum bewegen der Leiter
-  if (ServoWinkelLeiter < Soll && LeiterTimer + Verzoegerung < millis() && !PumpeIstAn) {                 // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
-    ServoWinkelLeiter++;                                                                                  // IstWinkel um 1 erhöhen
-    ServoLeiter.write(ServoWinkelLeiter);                                                                 // auf Wert drehen
-    LeiterTimer = millis();                                                                               // Timer für Wartezeit neu starten
+  // 3. Den aktiven Füllprozess abarbeiten
+  if (currentProcessingPosition != -1) {
+    handleFillingProcess(currentProcessingPosition, currentMillis, dur);
   }
-  if (ServoWinkelLeiter > Soll && LeiterTimer + Verzoegerung < millis()) {                                // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
-    ServoWinkelLeiter--;                                                                                  // IstWinkel um 1 verringern
-    ServoLeiter.write(ServoWinkelLeiter);                                                                 // auf Wert drehen
-    LeiterTimer = millis();                                                                               // Timer für WarteZeit neu starten
-  }
-  if (ServoWinkelLeiter == Soll) {                                                                        // Wenn Sollwinkel erreicht ist dann 
-    Schritt++;                                                                                            // zum nächsten Schritt gehen
-    if (Schritt == 4) {                                                                                   // Wenn Schritt 4 oder größer (Es gibt nur 3 Schritte)
-      InArbeit = 0;
-      Schritt = 1;
-     if (ServoMicrosDrehkranz != ServoDrehkranzRuhestellung) {
-        GlasDefinitionen[((WinkelGlas - WinkelErstesGlas) / SchwenkWinkelProGlas)] = 3;                   // Da der ablauf für dieses Glas abgeschlossen ist, wird der Status neu gesetzt
-      }    
-    }
-  }
-}
 
-//--------------------------------------------------------------------------------FUNKTION DREHKRANZ BEWEGEN--------------------------------------------------------------------------------
-int DrehkranzBewegen (int Soll, int Verzoegerung) {                                                       // Funktion zum bewegen des Drehkranzes
-    if (ServoMicrosDrehkranz < Soll && DrehkranzTimer + Verzoegerung < millis()) {                        // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
-    ServoMicrosDrehkranz++;                                                                               // IstWinkel um 1 erhöhen
-    ServoDrehkranz.writeMicroseconds(ServoMicrosDrehkranz);                                               // auf Wert drehen
-    DrehkranzTimer = millis();                                                                            // Timer für Wartezeit neu Starten
-  }
-    if (ServoMicrosDrehkranz > Soll && DrehkranzTimer + Verzoegerung < millis()) {                        // Wenn der SollWinkel nicht erreicht ist und die Wartezeit abgelaufen ist, dann weiterdrehen
-    ServoMicrosDrehkranz--;                                                                               // IstWinkel um 1 verringern
-    ServoDrehkranz.writeMicroseconds(ServoMicrosDrehkranz);                                               // auf Wert drehen
-    DrehkranzTimer = millis();                                                                            // Timer für Wartezeit neu Starten
-  }
-    if (ServoMicrosDrehkranz == Soll) {                                                                   // Wenn der Winkel erreicht ist,
-    Schritt++;                                                                                            // zum nächsten Schritt gehen
-  }
+  // 4. Inaktive Phasen und Servo-Rückkehr/Testbewegungen verwalten
+  handleRestingTimeout(currentMillis);
+  
+  // 5. LEDs aktualisieren
+  updateNeoPixels(currentMillis);
 }
