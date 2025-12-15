@@ -3,8 +3,8 @@
  * BESCHREIBUNG: Automatischer Getränke-Ausschenker mit Web-Konfiguration.
  * FUNKTION: Erkennt bis zu 6 Gläser, fährt diese sequenziell an und befüllt sie.
  * * AKTUELLER STATUS: 
- * - UI-Verbesserung: Glas-Positionen sind nun durch Rahmen (Fieldsets) visuell gruppiert.
- * - Speichern (Save) und Testen (Anfahren) leiten nun automatisch zur Konfigurationsseite zurück.
+ * * Detach der Servos während des Pumpens fehlt noch. --> erledigt!
+ * * Akkuanzeige fehlt noch
  */
 
 #include <Adafruit_NeoPixel.h> 
@@ -330,6 +330,8 @@ void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDura
       break;
 
     case PROCESS_PUMP_ON:
+      if (servoLift.attached()) servoLift.detach();
+      if (servoRotate.attached()) servoRotate.detach();
       if (currentMillis - startTime[pos] >= (unsigned long)fillingDuration) {
         ledcWrite(PinENA, 0);
         ledState[pos] = LED_GREEN; 
