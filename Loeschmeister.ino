@@ -1,10 +1,5 @@
 /**
- * PROJEKT: LOESCHMEISTER ESP32
- * BESCHREIBUNG: Automatischer Getränke-Ausschenker mit Web-Konfiguration.
- * FUNKTION: Erkennt bis zu 6 Gläser, fährt diese sequenziell an und befüllt sie.
- * * AKTUELLER STATUS: 
- * * Detach der Servos während des Pumpens fehlt noch. --> erledigt!
- * * Akkuanzeige fehlt noch
+ * PROJEKT: LOESCHMEISTER ESP32 - FINAL STABLE 20.12.25
  */
 
 #include <Adafruit_NeoPixel.h> 
@@ -16,10 +11,11 @@
 // ===============================================================================
 // 1. HARDWARE-PIN-DEFINITIONEN 
 // ===============================================================================
-#define LED_PIN 18         
+#define LED_PIN 18          
 #define SERVO_LIFT_PIN 17   
 #define SERVO_ROTATE_PIN 16 
-#define POTI_PIN 34        
+#define POTI_PIN 34         
+#define AKKU_PIN 35         
 const int SENSOR_PINS[6] = {32, 33, 25, 26, 27, 14};
 const byte PinENA = 23; 
 const byte PinIN1 = 22; 
@@ -39,19 +35,30 @@ const unsigned long FINISH_TIME = 1000;
 const int BLAULICHT_PATTERN[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};
 const long PULSE_DURATION = 55; 
 const int PATTERN_STEPS = 17;
-const int BASE_BLUE_BRIGHTNESS_MAX = 100;
-const int BASE_BLUE_BRIGHTNESS_MIN = 5;
+const int BASE_BLUE_BRIGHTNESS_MAX = 80;
+const int BASE_BLUE_BRIGHTNESS_MIN = 1;
 const int PULSE_SPEED_MS = 2000;
 
+const float VOLTAGE_DIVIDER_RATIO = 6.7;  // Neuberechnunng des Wertes --> VOLTAGE_DIVIDER_RATIO(NEU) = VOLTAGE_DIVIDER_RATIO*(GEMESSENE_AKKUSPANNUNG/ANGEZEIGTER_WERT) --> Zur glättung des Wertes sollte ein 100uF Kondensator zwischen Masse ind dem Pin geschaltet werden.
+const float ADC_REFERENCE_VOLTAGE = 3.3; 
+const int ADC_MAX_VALUE = 4095; 
+const float FULL_VOLTAGE = 16.8;        
+const float WARNING_VOLTAGE = 14.0;     
+const float LOW_VOLTAGE = 13.2;         
+const unsigned long BATTERY_CHECK_INTERVAL = 5000; 
+
 // ===============================================================================
-// 3. GLOBALE VARIABLEN & STATUS-SPEICHER
+// 3. GLOBALE VARIABLEN & STATUS
 // ===============================================================================
 Preferences preferences; 
 WebServer server(80);    
 const char* ap_ssid = "Loeschmeister_Konfig"; 
 const char* ap_password = "Passwort123"; 
 
-// --- Konfigurationsvariablen (werden aus Flash geladen) ---
+unsigned long lastBatteryCheckTime = 0; 
+float currentBatteryVoltage = 0.0;     
+bool isBatteryLow = false;              
+
 int liftDownMicroSec = 500;
 int liftUpMicroSec = 1500;
 int rotationMicroSecs[NUM_TOTAL_POSITIONS] = {500, 800, 1100, 1400, 1700, 2000, 2300};
@@ -65,7 +72,7 @@ int pumpSpeed = 200;
 long actualLiftUS;   
 long actualRotateUS; 
 
-enum LED_STATE { LED_OFF, LED_ACCEPTED, LED_RED, LED_RED_FADE_OUT, LED_RED_MANUAL_FADE_OUT, LED_BLUE_FLASH, LED_GREEN, LED_GREEN_FADE_OUT, LED_SOFT_RUN };
+enum LED_STATE { LED_OFF, LED_ACCEPTED, LED_RED, LED_RED_FADE_OUT, LED_RED_MANUAL_FADE_OUT, LED_BLUE_FLASH, LED_GREEN, LED_GREEN_FADE_OUT, LED_SOFT_RUN, LED_CRITICAL_LOW_BATT };
 enum FILLING_STATE { PROCESS_IDLE, PROCESS_CONFIRMED, PROCESS_LIFT_UP, PROCESS_ROTATE, PROCESS_LIFT_DOWN, PROCESS_PUMP_ON, PROCESS_PUMP_OFF, PROCESS_COMPLETE, PROCESS_RETURN_LIFT_UP, PROCESS_RETURN_ROTATE, PROCESS_RETURN_LIFT_DOWN };
 enum REST_RETURN_STATE { REST_IDLE, REST_LIFT_UP, REST_ROTATE, REST_LIFT_DOWN };
 
@@ -73,7 +80,7 @@ Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_PIXELS, LED_PIN, NEO_GRB + NEO_K
 Servo servoLift;
 Servo servoRotate;
 
-LED_STATE ledState[NUM_GLAS_POSITIONS] = {LED_OFF};
+LED_STATE ledState[NUM_GLAS_POSITIONS];
 FILLING_STATE processState[NUM_GLAS_POSITIONS] = {PROCESS_IDLE};
 unsigned long startTime[NUM_GLAS_POSITIONS] = {0};
 
@@ -82,8 +89,8 @@ bool isSystemBusy = false;
 unsigned long lastActivityTime = 0; 
 unsigned long lastServoStepTime = 0; 
 unsigned long lastPatternChange = 0; 
-int currentPatternIndexA = 0;       
-int currentPatternIndexB = 8;       
+int currentPatternIndexA = 0;        
+int currentPatternIndexB = 8;        
 int currentMechanismTargetAngle = -1; 
 REST_RETURN_STATE restState = REST_IDLE; 
 
@@ -91,7 +98,7 @@ unsigned long globalPulseStartTime = 0;
 int testTargetPosition = -1; 
 
 // ===============================================================================
-// 4. SPEICHER- & WEBSERVER-FUNKTIONEN 
+// 4. SPEICHER & WEBSEITE
 // ===============================================================================
 void loadConfiguration() {
   preferences.begin("lox-config", true);
@@ -104,7 +111,8 @@ void loadConfiguration() {
   minFillingTime = preferences.getUInt("minFill", minFillingTime);
   maxFillingTime = preferences.getUInt("maxFill", maxFillingTime);
   for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
-    char key[10]; sprintf(key, "rot%d", i);
+    char key[10];
+    sprintf(key, "rot%d", i);
     rotationMicroSecs[i] = preferences.getUInt(key, rotationMicroSecs[i]);
   }
   preferences.end();
@@ -121,47 +129,50 @@ void saveConfiguration() {
   preferences.putUInt("minFill", minFillingTime);
   preferences.putUInt("maxFill", maxFillingTime);
   for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
-    char key[10]; sprintf(key, "rot%d", i);
+    char key[10];
+    sprintf(key, "rot%d", i);
     preferences.putUInt(key, rotationMicroSecs[i]);
   }
   preferences.end();
 }
 
 String generateConfigPage() {
-  String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'><title>Löschmeister Konfig</title>";
-  // NEUE CSS für Fieldset/Legend
-  html += "<style>body{font-family:sans-serif;padding:20px;background:#f0f0f0;} h1{color:#d32f2f;} .box{background:white;padding:15px;border-radius:8px;margin-bottom:15px;box-shadow:0 2px 5px rgba(0,0,0,0.1);} label{display:inline-block;width:180px;margin-bottom:8px;} input{width:80px;padding:5px;} .test-btn{padding:5px 10px;background:#3f51b5;color:white;text-decoration:none;border-radius:4px;font-size:0.8em;margin-left:10px;}";
-  html += "input[type='submit'] { padding:10px 20px; background:#2e7d32; color:white; border:none; border-radius:5px; cursor:pointer; width:auto; min-width:150px; }";
-  html += "fieldset{border:1px solid #ccc; border-radius:6px; padding:10px 15px; margin-bottom:15px;} legend{font-weight:bold; color:#3f51b5; padding:0 10px;}"; // NEU
-  html += "</style></head><body>";
-  html += "<h1>🚒 Löschmeister Konfiguration</h1><form action='/save' method='post'>";
-  
-  html += "<div class='box'><h2>📏 Servo-Einstellungen</h2>";
-  html += "<label>Leiter AB (us):</label><input type='number' name='liftDown' value='" + String(liftDownMicroSec) + "'><br>";
-  html += "<label>Leiter AUF (us):</label><input type='number' name='liftUp' value='" + String(liftUpMicroSec) + "'><br>";
-  html += "<label>Schrittweite (us):</label><input type='number' name='microStep' value='" + String(microSecStep) + "'><br>";
-  html += "<label>Verzögerung (ms):</label><input type='number' name='stepDelay' value='" + String(stepDelayMs) + "'></div>";
-
-  html += "<div class='box'><h2>📍 Glas-Positionen</h2>";
-  
-  // Gruppierung für jede Glasposition (0-5)
-  for(int i = 0; i < 6; i++) {
-    html += "<fieldset><legend>Glas " + String(i+1) + " (Position " + String(i) + ")</legend>";
-    html += "<label>Mikrosekunden (us):</label><input type='number' name='rot" + String(i) + "' value='" + String(rotationMicroSecs[i]) + "'>";
-    html += "<a href='/test?pos=" + String(i) + "' class='test-btn' target='_blank'>Anfahren</a>";
-    html += "</fieldset>";
-  }
-  
-  // Gruppierung für die Ruheposition (6)
-  html += "<fieldset><legend>Ruheposition (Position 6)</legend>";
-  html += "<label>Mikrosekunden (us):</label><input type='number' name='rot6' value='" + String(rotationMicroSecs[6]) + "'>";
-  html += "<a href='/test?pos=6' class='test-btn' target='_blank'>Anfahren</a>";
-  html += "</fieldset></div>"; 
-
-  html += "<div class='box'><h2>🌀 Pumpe</h2><label>Speed (0-255):</label><input type='number' name='pumpSpeed' value='" + String(pumpSpeed) + "'><br>";
-  html += "<label>Ruherückkehr Wartezeit (ms):</label><input type='number' name='restDelay' value='" + String(restDelayMs) + "'></div>";
-  
-  html += "<input type='submit' value='💾 Alles Speichern'>";
+  float batteryPct = constrain((currentBatteryVoltage - LOW_VOLTAGE) / (FULL_VOLTAGE - LOW_VOLTAGE) * 100.0, 0, 100);
+  String html = "<!DOCTYPE html>";
+  html += "<html>";
+  html += "<head>";
+  html += "<meta charset='UTF-8'>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<title>Löschmeister</title>";
+  html += "<style>";
+  html += "body{font-family:sans-serif;padding:20px;background:#f0f0f0;}";
+  html += ".box{background:white;padding:15px;border-radius:8px;margin-bottom:15px;box-shadow:0 2px 5px rgba(0,0,0,0.1);}";
+  html += "label{display:inline-block;width:160px;}";
+  html += "input{width:80px;padding:5px;margin-bottom:5px;}";
+  html += ".test-btn{padding:5px 10px;background:#3f51b5;color:white;text-decoration:none;border-radius:4px;font-size:0.8em;}";
+  html += ".batt-container{width:100%; background:#ddd; border-radius:5px;}";
+  html += ".batt-bar{height:15px; width:" + String(batteryPct) + "%; background:" + (isBatteryLow ? "#f44336" : "#4CAF50") + "; border-radius:5px;}";
+  html += ".red-flag{background:#f44336; color:white; padding:15px; border-radius:8px; text-align:center; font-weight:bold; margin-bottom:15px; animation: blink 1s infinite;}";
+  html += "@keyframes blink{50%{opacity:0.5;}}";
+  html += "</style></head>";
+  html += "<body>";
+  html += "<h1>🚒 Löschmeister Konfig</h1>";
+  if (isBatteryLow) html += "<div class='red-flag'>⚠️ AKKU KRITISCH: " + String(currentBatteryVoltage, 2) + "V ⚠️</div>";
+  html += "<div class='box'><b>Akku:</b> " + String(currentBatteryVoltage, 2) + "V (" + String((int)batteryPct) + "%)";
+  html += "<div class='batt-container'><div class='batt-bar'></div></div></div>";
+  html += "<form action='/save' method='post'>";
+  html += "<div class='box'><h3>📏 Servos</h3>";
+  html += "<label>Ab (us):</label><input type='number' name='liftDown' value='" + String(liftDownMicroSec) + "'><br>";
+  html += "<label>Auf (us):</label><input type='number' name='liftUp' value='" + String(liftUpMicroSec) + "'></div>";
+  html += "<div class='box'><h3>🌀 Pumpe & Poti</h3>";
+  html += "<label>Pumpe Speed (0-255):</label><input type='range' name='pumpSpeed' min='0' max='255' value='" + String(pumpSpeed) + "' oninput='this.nextElementSibling.value = this.value'><output style='margin-left:10px; font-weight:bold;'>" + String(pumpSpeed) + "</output> <a href='/test?pump=1' class='test-btn' style='background:#f44336; margin-left:20px;'>Pumpe Test (2s)</a><br>";
+  html += "<label>Poti Min (ms):</label><input type='number' name='minFill' value='" + String(minFillingTime) + "'><br>";
+  html += "<label>Poti Max (ms):</label><input type='number' name='maxFill' value='" + String(maxFillingTime) + "'></div>";
+  html += "<div class='box'><h3>📍 Glas-Positionen</h3>";
+  for(int i = 0; i < 6; i++) html += "G" + String(i+1) + ": <input type='number' name='rot" + String(i) + "' value='" + String(rotationMicroSecs[i]) + "'> <a href='/test?pos=" + String(i) + "' class='test-btn'>Test</a><br>";
+  html += "Ruhe: <input type='number' name='rot6' value='" + String(rotationMicroSecs[6]) + "'>";
+  html += "<a href='/test?pos=6' class='test-btn'>Test</a></div>";
+  html += "<input type='submit' value='💾 Speichern' style='padding:10px;width:100%;background:#2e7d32;color:white;border:none;border-radius:5px;'>";
   html += "</form></body></html>";
   return html;
 }
@@ -169,196 +180,181 @@ String generateConfigPage() {
 void handleSave() {
   if (server.hasArg("liftDown")) liftDownMicroSec = server.arg("liftDown").toInt();
   if (server.hasArg("liftUp")) liftUpMicroSec = server.arg("liftUp").toInt();
-  if (server.hasArg("stepDelay")) stepDelayMs = server.arg("stepDelay").toInt();
-  if (server.hasArg("microStep")) microSecStep = server.arg("microStep").toInt();
   if (server.hasArg("pumpSpeed")) pumpSpeed = server.arg("pumpSpeed").toInt();
-  if (server.hasArg("restDelay")) restDelayMs = server.arg("restDelay").toInt();
-  
+  if (server.hasArg("minFill")) minFillingTime = server.arg("minFill").toInt();
+  if (server.hasArg("maxFill")) maxFillingTime = server.arg("maxFill").toInt();
   for(int i = 0; i < NUM_TOTAL_POSITIONS; i++) {
     char arg[10]; sprintf(arg, "rot%d", i);
     if (server.hasArg(arg)) rotationMicroSecs[i] = server.arg(arg).toInt();
   }
-  
   saveConfiguration();
-  
-  String response = "Die Werte wurden gespeichert. Bitte starten Sie den ESP32 neu, um sie zu aktivieren.";
-  
-  server.sendHeader("Location", "/", true);
-  server.send(302, "text/plain", response);
+  server.sendHeader("Location", "/", true); server.send(302, "text/plain", "");
 }
 
 void handleTestMove() {
+  if (server.hasArg("pump")) {
+    digitalWrite(PinIN1, HIGH);
+    digitalWrite(PinIN2, LOW);
+    ledcWrite(PinENA, pumpSpeed);
+    delay(2000);
+    ledcWrite(PinENA, 0);
+    server.sendHeader("Location", "/", true);
+    server.send(302, "text/plain", "");
+    return;
+  }
   if (server.hasArg("pos")) {
     int p = server.arg("pos").toInt();
     if (p >= 0 && p < NUM_TOTAL_POSITIONS) {
-      
-      isSystemBusy = true; 
-      currentProcessingPosition = -1; 
-      testTargetPosition = p; 
       currentMechanismTargetAngle = rotationMicroSecs[p]; 
-      
+      testTargetPosition = p;
+      isSystemBusy = true;
       if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
       if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
-
-      actualLiftUS = liftDownMicroSec; 
       restState = REST_LIFT_UP; 
-      
       server.sendHeader("Location", "/", true);
-      server.send(302, "text/plain", "Weiterleitung zur Konfigurationsseite.");
-      
+      server.send(302, "text/plain", "");
       return;
     }
   }
-  server.send(400, "text/plain", "Fehler: Ungültige Position (0-6).");
+  server.send(400, "text/plain", "Error");
 }
 
 // ===============================================================================
-// 5. KERN-LOGIK: BEWEGUNG & SENSOREN
+// 5. KERN-LOGIK
 // ===============================================================================
 
-// Funktion zur sanften, schrittweisen Servobewegung
+void handleBatteryCheck(unsigned long currentMillis) {
+  if (currentMillis - lastBatteryCheckTime < BATTERY_CHECK_INTERVAL) return;
+  lastBatteryCheckTime = currentMillis;
+  float v_out = (analogRead(AKKU_PIN) / (float)ADC_MAX_VALUE) * ADC_REFERENCE_VOLTAGE;
+  currentBatteryVoltage = v_out * VOLTAGE_DIVIDER_RATIO;
+  isBatteryLow = (currentBatteryVoltage <= LOW_VOLTAGE);
+}
+
 bool moveServoGradually(Servo &servo, long &actualValue, long targetValue, unsigned long currentMillis) {
   if (actualValue == targetValue) return true;
-  
   if (currentMillis - lastServoStepTime >= (unsigned long)stepDelayMs) {
     lastServoStepTime = currentMillis;
-    
     if (actualValue < targetValue) actualValue += microSecStep;
     else actualValue -= microSecStep;
-    
     if (abs(targetValue - actualValue) < microSecStep) actualValue = targetValue;
-    
     servo.writeMicroseconds(actualValue);
   }
   return (actualValue == targetValue);
 }
 
-// Überwacht die Glas-Sensoren und steuert die LED-Farben
 void handleSensorLogic(int pos, unsigned long currentMillis) {
   bool isPresent = (digitalRead(SENSOR_PINS[pos]) == LOW);
-  
-  bool isWaitingForService = (ledState[pos] == LED_ACCEPTED || ledState[pos] == LED_RED || ledState[pos] == LED_RED_FADE_OUT || ledState[pos] == LED_BLUE_FLASH);
-  
-  bool removedDuringWait = !isPresent && isWaitingForService; 
-  
-  // Zustandswechsel: Grün -> Ausfaden (entfernt)
-  if (!isPresent && ledState[pos] == LED_GREEN) {
-      ledState[pos] = LED_GREEN_FADE_OUT; 
-      startTime[pos] = currentMillis;
-  }
-  
-  // Zustandswechsel: Fade Out Ende -> Blau Pulsieren
-  if ((ledState[pos] == LED_GREEN_FADE_OUT || ledState[pos] == LED_RED_MANUAL_FADE_OUT) && currentMillis - startTime[pos] >= FADE_OUT_DURATION) {
-      ledState[pos] = LED_SOFT_RUN; 
-  }
-  
-  // Zustandswechsel: Blau Pulsieren -> Rot/Füllen (Glas erkannt)
-  if ((ledState[pos] == LED_SOFT_RUN || ledState[pos] == LED_OFF) && isPresent) { 
-      ledState[pos] = LED_ACCEPTED; 
-      startTime[pos] = currentMillis; 
-  }
-
-  // --- GLAS ENTFERNT (Während es auf Bedienung wartete) ---
-  if (removedDuringWait) {
-    if (processState[pos] == PROCESS_PUMP_ON) ledcWrite(PinENA, 0);
-    
-    ledState[pos] = LED_RED_MANUAL_FADE_OUT; 
-    startTime[pos] = currentMillis; 
-    
+  if (!isPresent && (ledState[pos] == LED_ACCEPTED || ledState[pos] == LED_RED || ledState[pos] == LED_RED_FADE_OUT || ledState[pos] == LED_BLUE_FLASH || ledState[pos] == LED_GREEN)) {
+    if (currentProcessingPosition == pos && processState[pos] == PROCESS_PUMP_ON){
+      ledcWrite(PinENA, 0);
+    }
+    ledState[pos] = LED_RED_MANUAL_FADE_OUT; startTime[pos] = currentMillis; 
     if (currentProcessingPosition == pos) {
-      isSystemBusy = true;
-      currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+      isSystemBusy = true; currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
       processState[pos] = PROCESS_RETURN_LIFT_UP;
     } else {
       processState[pos] = PROCESS_IDLE;
     }
-    lastActivityTime = currentMillis;
-    return;
   }
-  // ---------------------------------------------------
-
-  // Ablauf der Glas-Erkennung (Farben-Logik)
+  if (isPresent && (ledState[pos] == LED_SOFT_RUN || ledState[pos] == LED_OFF)) { 
+    ledState[pos] = LED_ACCEPTED;
+    startTime[pos] = currentMillis; 
+  }
+  if ((ledState[pos] == LED_GREEN_FADE_OUT || ledState[pos] == LED_RED_MANUAL_FADE_OUT) && (currentMillis - startTime[pos] >= FADE_OUT_DURATION)) {
+    ledState[pos] = LED_SOFT_RUN; 
+  }
   switch (ledState[pos]) {
-    case LED_ACCEPTED: 
-      if (currentMillis - startTime[pos] >= FADE_UP_DURATION) { 
-        ledState[pos] = LED_RED; 
-        startTime[pos] = currentMillis; 
-      } 
-      break;
-    case LED_RED: 
-      if (currentMillis - startTime[pos] >= DELAY_START_PROCESS) { 
-        ledState[pos] = LED_RED_FADE_OUT; 
-        startTime[pos] = currentMillis; 
-      } 
-      break;
+    case LED_ACCEPTED:
+      if (currentMillis - startTime[pos] >= FADE_UP_DURATION) {
+        ledState[pos] = LED_RED;
+        startTime[pos] = currentMillis;
+      }
+    break;
+    
+    case LED_RED:
+      if (currentMillis - startTime[pos] >= DELAY_START_PROCESS) {
+        ledState[pos] = LED_RED_FADE_OUT;
+        startTime[pos] = currentMillis;
+      }
+    break;
+    
     case LED_RED_FADE_OUT:
       if (currentMillis - startTime[pos] >= FADE_OUT_DURATION) {
         ledState[pos] = LED_BLUE_FLASH;
-        processState[pos] = PROCESS_CONFIRMED; 
+        processState[pos] = PROCESS_CONFIRMED;
       }
-      break;
-    default: break;
+    break;
+
+    default:
+    break;
   }
 }
 
-// Steuert den Füllprozess
 void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDuration) {
   if (pos != currentProcessingPosition) return;
-
+  if (processState[pos] != PROCESS_PUMP_ON && processState[pos] != PROCESS_IDLE) {
+    if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
+    if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+  }
+  
   switch (processState[pos]) {
     case PROCESS_CONFIRMED:
-      if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
-      if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
       processState[pos] = PROCESS_LIFT_UP;
-      break;
-
+    break;
+    
     case PROCESS_LIFT_UP:
-      if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) processState[pos] = PROCESS_ROTATE;
-      break;
-
+      if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) {
+        processState[pos] = PROCESS_ROTATE;
+      }
+    break;
+    
     case PROCESS_ROTATE:
-      if (moveServoGradually(servoRotate, actualRotateUS, rotationMicroSecs[pos], currentMillis)) processState[pos] = PROCESS_LIFT_DOWN;
-      break;
-
+      if (moveServoGradually(servoRotate, actualRotateUS, rotationMicroSecs[pos], currentMillis)) {
+        processState[pos] = PROCESS_LIFT_DOWN;
+      }
+    break;
+    
     case PROCESS_LIFT_DOWN:
       if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, currentMillis)) {
         processState[pos] = PROCESS_PUMP_ON;
-        digitalWrite(PinIN1, HIGH); digitalWrite(PinIN2, LOW);
+        digitalWrite(PinIN1, HIGH);
+        digitalWrite(PinIN2, LOW);
         ledcWrite(PinENA, pumpSpeed);
         startTime[pos] = currentMillis;
       }
-      break;
-
+    break;
+    
     case PROCESS_PUMP_ON:
       if (servoLift.attached()) servoLift.detach();
       if (servoRotate.attached()) servoRotate.detach();
       if (currentMillis - startTime[pos] >= (unsigned long)fillingDuration) {
         ledcWrite(PinENA, 0);
-        ledState[pos] = LED_GREEN; 
-        processState[pos] = PROCESS_PUMP_OFF;
+        ledState[pos] = LED_GREEN;
+        processState[pos] = PROCESS_PUMP_OFF; 
         startTime[pos] = currentMillis; 
       }
-      break;
+    break;
 
     case PROCESS_PUMP_OFF:
       if (currentMillis - startTime[pos] >= FINISH_TIME) {
+        servoLift.attach(SERVO_LIFT_PIN);
+        servoRotate.attach(SERVO_ROTATE_PIN);
         int next = -1;
-        for (int i = 0; i < 6; i++) { if (processState[i] == PROCESS_CONFIRMED) { next = i; break; } }
-        
-        if (next != -1) {
-          currentMechanismTargetAngle = rotationMicroSecs[next];
-          currentProcessingPosition = next;
-        } else {
-          currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+        for (int i = 0; i < 6; i++) if (processState[i] == PROCESS_CONFIRMED) {
+          next = i;
+          break;
         }
+        currentMechanismTargetAngle = (next != -1) ? rotationMicroSecs[next] : rotationMicroSecs[REST_POSITION_INDEX];
+        if (next != -1) currentProcessingPosition = next;
         processState[pos] = PROCESS_RETURN_LIFT_UP;
       }
-      break;
-
+    break;
+    
     case PROCESS_RETURN_LIFT_UP:
       if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) processState[pos] = PROCESS_RETURN_ROTATE;
-      break;
-
+    break;
+    
     case PROCESS_RETURN_ROTATE:
       if (moveServoGradually(servoRotate, actualRotateUS, currentMechanismTargetAngle, currentMillis)) {
         if (currentMechanismTargetAngle == rotationMicroSecs[REST_POSITION_INDEX]) {
@@ -368,274 +364,170 @@ void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDura
           processState[currentProcessingPosition] = PROCESS_LIFT_DOWN;
         }
       }
-      break;
-
+    break;
+    
     case PROCESS_RETURN_LIFT_DOWN:
       if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, currentMillis)) {
         processState[pos] = PROCESS_COMPLETE;
         isSystemBusy = false;
         currentProcessingPosition = -1;
-        
         servoLift.detach();
         servoRotate.detach();
       }
+    break;
+    
+    default:
+    break;
+  }
+}
+
+void handleRestingTimeout(unsigned long currentMillis) {
+  if (currentProcessingPosition != -1) return;
+  if (testTargetPosition == -1 && restState == REST_IDLE && !isSystemBusy) {
+    if (actualLiftUS != liftDownMicroSec || actualRotateUS != rotationMicroSecs[REST_POSITION_INDEX]) {
+      if (currentMillis - lastActivityTime >= (unsigned long)restDelayMs) {
+        servoLift.attach(SERVO_LIFT_PIN);
+        servoRotate.attach(SERVO_ROTATE_PIN);
+        currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
+        restState = REST_LIFT_UP;
+      }
+    }
+  }
+  if (restState != REST_IDLE) {
+    switch (restState) {
+      case REST_LIFT_UP:
+        if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, currentMillis)) {
+          restState = REST_ROTATE;
+        }    
+      break;
+      
+      case REST_ROTATE:
+        if (moveServoGradually(servoRotate, actualRotateUS, currentMechanismTargetAngle, currentMillis)) {
+          restState = REST_LIFT_DOWN;
+        }
+      break;
+      
+      case REST_LIFT_DOWN:
+        if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, currentMillis)) { 
+          restState = REST_IDLE;
+          servoLift.detach();
+          servoRotate.detach();
+          if (testTargetPosition != -1) {
+            isSystemBusy = false;
+            testTargetPosition = -1;
+          }
+          lastActivityTime = currentMillis;
+        }
+      break;
+    }
+  }
+}
+
+void updateNeoPixels(unsigned long currentMillis) {
+  int bluePulse = (int)(BASE_BLUE_BRIGHTNESS_MIN + ((-cos((float)(currentMillis - globalPulseStartTime) * 2.0 * PI / PULSE_SPEED_MS) + 1.0) / 2.0) * (BASE_BLUE_BRIGHTNESS_MAX - BASE_BLUE_BRIGHTNESS_MIN));
+  for (int i = 0; i < 6; i++) {
+    uint32_t color = 0;
+    switch (ledState[i]) {
+      case LED_CRITICAL_LOW_BATT:
+        color = ((currentMillis / 250) % 2 == 0) ? strip.Color(255, 0, 0) : 0;
       break;
 
-    default: break;
-  }
-}
-
-// Handhabt nun sowohl den Ruhe-Timeout als auch die Testbewegungen
-void handleRestingTimeout(unsigned long currentMillis) {
-  // Wenn ein Füllprozess aktiv ist, nicht eingreifen
-  if (currentProcessingPosition != -1) return;
-
-  // 1. Logik: Automatischer Ruhe-Timeout
-  // Nur aktiv, wenn KEIN Test läuft.
-  if (testTargetPosition == -1) { 
-    if (restState == REST_IDLE && !isSystemBusy) {
-      // Prüfe, ob wir nicht bereits in der Ruheposition sind
-      if (actualLiftUS != liftDownMicroSec || actualRotateUS != rotationMicroSecs[REST_POSITION_INDEX]) {
-        if (currentMillis - lastActivityTime >= (unsigned long)restDelayMs) {
-          if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
-          if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
-          currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
-          restState = REST_LIFT_UP;
-        }
-      }
-    }
-  }
-
-  // 2. Abarbeitung der Servo-Bewegung (gilt für Setup, Timeout und Testmodus)
-  if (restState != REST_IDLE) {
+      case LED_SOFT_RUN:
+        color = strip.Color(0, 0, bluePulse);
+      break;
       
-      unsigned long stepTime = currentMillis; 
+      case LED_ACCEPTED:
+        color = strip.Color(map(currentMillis - startTime[i], 0, FADE_UP_DURATION, 0, 255), 0, map(currentMillis - startTime[i], 0, FADE_UP_DURATION, bluePulse, 0));
+      break;
 
-      switch (restState) {
-          case REST_LIFT_UP: 
-              if (moveServoGradually(servoLift, actualLiftUS, liftUpMicroSec, stepTime)) restState = REST_ROTATE; 
-              break;
-          case REST_ROTATE: 
-              if (moveServoGradually(servoRotate, actualRotateUS, currentMechanismTargetAngle, stepTime)) restState = REST_LIFT_DOWN; 
-              break;
-          case REST_LIFT_DOWN: 
-              if (moveServoGradually(servoLift, actualLiftUS, liftDownMicroSec, stepTime)) { 
-                  restState = REST_IDLE; 
-                  servoLift.detach(); servoRotate.detach();
-                  
-                  // Reset der Testvariablen und des Busy-Zustands, wenn es ein Test war
-                  if (testTargetPosition != -1) {
-                      isSystemBusy = false;
-                      testTargetPosition = -1;
-                  }
-                  lastActivityTime = currentMillis; // Wichtig: Setze die Aktivitätszeit zurück, um den nächsten Timeout zu starten
-              } 
-              break;
-          default: break;
-      }
-  }
-}
+      case LED_RED:
+        color = strip.Color(255, 0, 0);
+      break;
 
-// Stellt sicher, dass LEDs im Ruhezustand auf Blau Pulsieren gesetzt werden
-void handleRestingLED(unsigned long currentMillis) {
-  if (globalPulseStartTime == 0) {
-      globalPulseStartTime = currentMillis;
-  }
+      case LED_RED_FADE_OUT:
+        color = strip.Color(map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, 255, 0), 0, map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, 0, bluePulse));
+      break;
 
-  for(int i = 0; i < NUM_GLAS_POSITIONS; i++) {
-    if (ledState[i] == LED_OFF) {
-        ledState[i] = LED_SOFT_RUN;
+      case LED_RED_MANUAL_FADE_OUT:
+        color = strip.Color(map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, 255, 0), 0, 0);
+      break;
+
+      case LED_GREEN: color = strip.Color(0, map(currentMillis - startTime[i], 0, FINISH_TIME, 0, 255), 0); break;
+
+      case LED_GREEN_FADE_OUT:
+        color = strip.Color(0, map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, 255, 0), 0);
+      break;
+
+      case LED_BLUE_FLASH:
+        if (BLAULICHT_PATTERN[((i % 2 == 0) ? currentPatternIndexA : currentPatternIndexB)] == 1) color = strip.Color(0, 0, 255);
+      break;
+
+      default:
+      break;
     }
-  }
-}
-
-// Berechnet den Blauen Puls-Faktor synchron für alle LEDs
-int calculatePulsingBlue(unsigned long currentMillis) {
-    unsigned long elapsed = currentMillis - globalPulseStartTime;
-    
-    float frequency = 2.0 * PI / (float)PULSE_SPEED_MS;
-    float cosValue = cos((float)elapsed * frequency);
-    float waveValue = -cosValue; 
-    float pulseFactor = (waveValue + 1.0) / 2.0; 
-    
-    int span = BASE_BLUE_BRIGHTNESS_MAX - BASE_BLUE_BRIGHTNESS_MIN;
-    
-    return (int)(BASE_BLUE_BRIGHTNESS_MIN + pulseFactor * span);
-}
-
-
-// Zeichnet die LED-Farben basierend auf dem Status
-void updateNeoPixels(unsigned long currentMillis) {
-  
-  for (int i = 0; i < 6; i++) {
-    uint32_t color = strip.Color(0,0,0);
-    
-    switch (ledState[i]) {
-        case LED_SOFT_RUN: { 
-            int B = calculatePulsingBlue(currentMillis); 
-            color = strip.Color(0, 0, B);
-            break;
-        }
-        case LED_ACCEPTED: {
-            unsigned long elapsed = currentMillis - startTime[i];
-            
-            int R_brightness;
-            R_brightness = map(elapsed, 0, FADE_UP_DURATION, 0, 255);
-            R_brightness = constrain(R_brightness, 0, 255);
-            
-            int B_fade;
-            B_fade = map(elapsed, 0, FADE_UP_DURATION, BASE_BLUE_BRIGHTNESS_MAX, 0);
-            B_fade = constrain(B_fade, 0, 255); 
-            
-            color = strip.Color(R_brightness, 0, B_fade);
-            break;
-        }
-        case LED_RED: 
-            color = strip.Color(255, 0, 0);
-            break;
-            
-        case LED_RED_FADE_OUT: {
-            unsigned long elapsed = currentMillis - startTime[i];
-            
-            int R_fade;
-            R_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
-            R_fade = constrain(R_fade, 0, 255);
-            
-            int B_fade; 
-            B_fade = map(elapsed, 0, FADE_OUT_DURATION, 0, 255);
-            B_fade = constrain(B_fade, 0, 255); 
-            
-            color = strip.Color(R_fade, 0, B_fade);
-            break;
-        }
-        
-        case LED_RED_MANUAL_FADE_OUT: {
-            unsigned long elapsed = currentMillis - startTime[i];
-            
-            int R_fade;
-            R_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
-            R_fade = constrain(R_fade, 0, 255);
-            
-            color = strip.Color(R_fade, 0, 0);
-            break;
-        }
-            
-        case LED_GREEN: {
-            unsigned long elapsed = currentMillis - startTime[i];
-            int G_brightness;
-            G_brightness = map(elapsed, 0, FINISH_TIME, 0, 255);
-            G_brightness = constrain(G_brightness, 0, 255);
-            color = strip.Color(0, G_brightness, 0);
-            break;
-        }
-        
-        case LED_GREEN_FADE_OUT: {
-            unsigned long elapsed = currentMillis - startTime[i];
-            
-            int G_fade;
-            G_fade = map(elapsed, 0, FADE_OUT_DURATION, 255, 0);
-            G_fade = constrain(G_fade, 0, 255);
-            
-            color = strip.Color(0, G_fade, 0);
-            break;
-        }
-        
-        case LED_BLUE_FLASH: {
-            int idx = (i % 2 == 0) ? currentPatternIndexA : currentPatternIndexB;
-            if (BLAULICHT_PATTERN[idx] == 1) color = strip.Color(0, 0, 255);
-            break;
-        }
-        case LED_OFF:
-        default:
-            color = strip.Color(0, 0, 0);
-            break;
-    }
-    
     strip.setPixelColor(i, color);
   }
   strip.show();
 }
 
-void handleBlueFlashTimer(unsigned long currentMillis) {
-  if (currentMillis - lastPatternChange >= PULSE_DURATION) {
-    lastPatternChange = currentMillis;
-    currentPatternIndexA = (currentPatternIndexA + 1) % PATTERN_STEPS;
-    currentPatternIndexB = (currentPatternIndexB + 1) % PATTERN_STEPS;
-  }
-}
-
-// ===============================================================================
-// 6. HAUPTPROGRAMM (SETUP & LOOP) 
-// ===============================================================================
-
 void setup() {
   Serial.begin(115200);
   loadConfiguration();
-
-  // WLAN Access Point starten
-  WiFi.softAP(ap_ssid, ap_password, 6, 0, 1);
+  
+  WiFi.softAP(ap_ssid, ap_password);
   server.on("/", [](){ server.send(200, "text/html", generateConfigPage()); });
   server.on("/save", handleSave);
   server.on("/test", handleTestMove);
   server.begin();
-
-  // Hardware Pins konfigurieren
-  for (int i = 0; i < 6; i++) pinMode(SENSOR_PINS[i], INPUT_PULLUP);
+  
+  for (int i = 0; i < 6; i++) {
+    pinMode(SENSOR_PINS[i], INPUT_PULLUP);
+    ledState[i] = LED_SOFT_RUN;
+  }
   pinMode(POTI_PIN, INPUT);
   ledcAttach(PinENA, 5000, 8);
-  pinMode(PinIN1, OUTPUT); pinMode(PinIN2, OUTPUT);
-  digitalWrite(PinIN1, LOW); digitalWrite(PinIN2, LOW);
-
-  strip.begin(); strip.show();
+  pinMode(PinIN1, OUTPUT);
+  pinMode(PinIN2, OUTPUT);
+  strip.begin();
+  strip.show();
   ESP32PWM::allocateTimer(1);
-  
-  // Servos anbinden
-  servoLift.attach(SERVO_LIFT_PIN); 
+  servoLift.attach(SERVO_LIFT_PIN);
   servoRotate.attach(SERVO_ROTATE_PIN);
-  
-  // Startwerte für Ist-Position setzen 
-  actualLiftUS = liftDownMicroSec; 
+  actualLiftUS = liftDownMicroSec;
   actualRotateUS = rotationMicroSecs[REST_POSITION_INDEX];
-
-  // Sanftes Anfahren der Ruheposition im Setup mit LIFT_UP starten
   currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
-  restState = REST_LIFT_UP; 
-  
+  restState = REST_LIFT_UP;
+  globalPulseStartTime = millis();
   lastActivityTime = millis();
-  globalPulseStartTime = millis(); 
 }
 
 void loop() {
   unsigned long currentMillis = millis();
   server.handleClient();
-  handleBlueFlashTimer(currentMillis);
-  
-  handleRestingLED(currentMillis);
-  
+  handleBatteryCheck(currentMillis);
+  if (currentMillis - lastPatternChange >= PULSE_DURATION) {
+    lastPatternChange = currentMillis;
+    currentPatternIndexA = (currentPatternIndexA + 1) % PATTERN_STEPS;
+    currentPatternIndexB = (currentPatternIndexB + 1) % PATTERN_STEPS;
+  }
   long dur = map(analogRead(POTI_PIN), 0, 4095, minFillingTime, maxFillingTime);
-
-  // 1. Alle Sensoren prüfen
-  for (int i = 0; i < 6; i++) handleSensorLogic(i, currentMillis);
-
-  // 2. Prüfen, ob ein neues Glas bedient werden muss
-  if (!isSystemBusy && testTargetPosition == -1) { // Nur starten, wenn nicht im Testmodus
+  if (isBatteryLow) {
     for (int i = 0; i < 6; i++) {
-      if (ledState[i] == LED_BLUE_FLASH && processState[i] == PROCESS_CONFIRMED) {
-        currentProcessingPosition = i; 
-        isSystemBusy = true; 
-        break;
+      ledState[i] = LED_CRITICAL_LOW_BATT;
+    }
+    ledcWrite(PinENA, 0);
+  } else {
+    for (int i = 0; i < 6; i++) {
+      handleSensorLogic(i, currentMillis);
+    }
+    if (!isSystemBusy && currentProcessingPosition == -1) {
+      for (int i = 0; i < 6; i++) if (processState[i] == PROCESS_CONFIRMED) {
+        currentProcessingPosition = i;
+        isSystemBusy = true; break;
       }
     }
   }
-
-  // 3. Den aktiven Füllprozess abarbeiten
-  if (currentProcessingPosition != -1) {
-    handleFillingProcess(currentProcessingPosition, currentMillis, dur);
-  }
-
-  // 4. Inaktive Phasen und Servo-Rückkehr/Testbewegungen verwalten
+  handleFillingProcess(currentProcessingPosition, currentMillis, dur);
   handleRestingTimeout(currentMillis);
-  
-  // 5. LEDs aktualisieren
   updateNeoPixels(currentMillis);
 }
