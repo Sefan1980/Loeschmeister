@@ -17,6 +17,10 @@ Zudem kann die gesamte Konfiguration (Winkel, Geschwindigkeiten, Füllzeiten) ü
 | **Lichter** | Adafruit NeoPixel oder kompatibler WS2812B LED-Streifen (6 LEDs) |
 | **Sensoren** | 6x IR-Näherungssensoren |
 | **Eingabe** | 1x Potentiometer (Poti) |
+| **Akku** | 1x 4S LiPo (andere Akkus sind zur Zeit nicht implementiert) |
+| **Widerstände** | 1x 10kOhm, 1x 56kOhm (Spannungsteiler - bei anderen Akkus können andere Werte nötig sein!)|
+| **StepDownWandler** | 2x z.B. LM2596 (Um die Spannung vom Akku auf 12V für den Motortreiber bzw. auf 5V für das Board und die Servos zu begrenzen ) |
+
 ---
 
 ## 📌 Pin-Belegung (Pinout)
@@ -33,6 +37,8 @@ Der Sketch verwendet die folgenden GPIO-Pins des ESP32:
 | **Pumpe IN1** | **22** | **`PinIN1`** (Richtung) |
 | **Pumpe IN2** | **21** | **`PinIN2`** (Richtung) |
 | **Sensoren** | 32, 33, 25, 26, 27, 14 | (Wird im Array `SENSOR_PINS` definiert) |
+| **Spannungsteiler** | **35**| analogRead(AKKU_PIN) |
+
 ---
 
 ## ⚙️ Software-Einrichtung (Arduino IDE)
