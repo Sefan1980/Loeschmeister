@@ -245,16 +245,34 @@ void handleTestMove() {
 // ===============================================================================
 
 /**
- * Liest die Akkuspannung und setzt den Status bei Unterspannung.
+ * Liest die Akkuspannung (Mittelwert aus 10 Messungen) und setzt den Status.
  */
 void handleBatteryCheck(unsigned long currentMillis) {
   if (currentMillis - lastBatteryCheckTime < BATTERY_CHECK_INTERVAL) return;
   lastBatteryCheckTime = currentMillis;
-  float v_out = (analogRead(AKKU_PIN) / (float)ADC_MAX_VALUE) * ADC_REFERENCE_VOLTAGE;
-  currentBatteryVoltage = v_out * VOLTAGE_DIVIDER_RATIO;
-  isBatteryLow = (currentBatteryVoltage <= LOW_VOLTAGE);
-}
 
+  long adcSum = 0;
+  
+  // 10 Messungen durchführen
+  for (int i = 0; i < 10; i++) {
+    adcSum += analogRead(AKKU_PIN);
+    delay(2); // Kurze Pause für die Stabilität des ADC
+  }
+  
+  // Durchschnitt berechnen
+  float averageADC = (float)adcSum / 10.0;
+  
+  // Umrechnung in Spannung
+  float v_out = (averageADC / (float)ADC_MAX_VALUE) * ADC_REFERENCE_VOLTAGE;
+  currentBatteryVoltage = v_out * VOLTAGE_DIVIDER_RATIO;
+  
+  isBatteryLow = (currentBatteryVoltage <= LOW_VOLTAGE);
+
+  // Debug-Ausgabe für die Konsole (optional)
+  Serial.print("Batteriespannung: ");
+  Serial.print(currentBatteryVoltage);
+  Serial.println(" V");
+}
 /**
  * Bewegt einen Servo ruckelfrei in kleinen Schritten zum Zielwert.
  * @return true, wenn das Ziel erreicht wurde.
