@@ -1,5 +1,5 @@
-/*
- * PROJEKT: LOESCHMEISTER ESP32
+/**
+ * PROJEKT: LOESCHMEISTER ESP32 - FINAL STABLE 20.12.25
  * Beschreibung: Automatisierte Glasbefüllung mit Servo-Steuerung, 
  * Pumpenregelung, Akku-Überwachung und Web-Interface zur Konfiguration.
  */
@@ -27,9 +27,9 @@ const byte PinIN2 = 21;     // Richtungspin 2 für Pumpe
 // ===============================================================================
 // 2. KONSTANTEN & EINSTELLUNGEN 
 // ===============================================================================
-const int NUM_GLAS_POSITIONS = 6;  // Anzal der Stellplätze für die Gläser
+const int NUM_GLAS_POSITIONS = 6;
 const int NUM_TOTAL_POSITIONS = 7; // 6 Gläser + 1 Ruheposition
-const int REST_POSITION_INDEX = 6; // Index der Ruheposition im Array (0-6 = 7 Positionen)
+const int REST_POSITION_INDEX = 6; // Index der Ruheposition im Array
 const int NUM_PIXELS = 6;          // Anzahl der LEDs im Streifen
 
 // Zeitkonstanten für Animationen und Prozesse (in ms)
@@ -40,7 +40,8 @@ const unsigned long FINISH_TIME = 1000;
 
 // Blaulicht-Effekt (Feuerwehr-Simulation)
 const int BLAULICHT_PATTERN[] = {1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, -1};
-const long PULSE_DURATION = 25; // Geschwindigkeit des Blitzens
+const long PULSE_DURATION = 38; // ms pro Blitz-Schritt. Bei Servofahrt steht die Schleife ca. 40 ms, dort läuft der Takt ohnehin mit ~25 Schritten/s;
+                                // 38 liegt knapp darunter, damit dort keine Schritte ausfallen und der Takt überall gleich wirkt.
 const int PATTERN_STEPS = 17;
 const int BASE_BLUE_BRIGHTNESS_MAX = 80;
 const int BASE_BLUE_BRIGHTNESS_MIN = 1;
@@ -106,7 +107,6 @@ unsigned long lastActivityTime = 0;
 unsigned long lastServoStepTime = 0; 
 unsigned long lastPatternChange = 0; 
 int currentPatternIndexA = 0;        
-int currentPatternIndexB = 8;        
 int currentMechanismTargetAngle = -1; 
 REST_RETURN_STATE restState = REST_IDLE; 
 
@@ -123,6 +123,20 @@ unsigned long sensorLastChangeTime[NUM_GLAS_POSITIONS] = {0};
 const unsigned long DETACH_SETTLE_MS = 200; // Wartezeit vor Servo-Detach, non-blocking
 unsigned long fillingDetachWaitStart = 0;
 unsigned long restDetachWaitStart = 0;
+
+// Servos lösen, sobald der Arm im Glas steht (Pumpen + Nachtropfen). 0 = Servos halten durchgehend.
+// Standard 0: beim Lösen verdrehen sich die Servos.
+#define SERVOS_BEIM_PUMPEN_LOESEN 0
+
+// Diagnose Blitztakt: auf 0 setzen, um die Serial-Ausgabe abzuschalten
+#define DEBUG_BLITZ 0
+#if DEBUG_BLITZ
+unsigned long dbgLastReport = 0;
+unsigned long dbgLastLoopUs = 0;
+unsigned long dbgMaxWriteUs = 0; // längste Dauer eines servo.writeMicroseconds()
+unsigned long dbgMaxGapUs = 0;   // längste Pause zwischen zwei loop()-Durchläufen
+unsigned int dbgPatternSteps = 0; // Blitz-Schritte seit dem letzten Report (Soll: 1000/PULSE_DURATION)
+#endif
 
 bool pumpTestRunning = false;
 unsigned long pumpTestStartTime = 0;
@@ -221,6 +235,35 @@ String generateConfigPage() {
  * Verarbeitet die vom Browser gesendeten Daten und speichert sie.
  */
 /**
+ * Hängt beide Servos an (nur falls nötig) und meldet es auf der Konsole.
+ */
+void attachServos() {
+  bool didAttach = false;
+  if (!servoLift.attached())   { servoLift.attach(SERVO_LIFT_PIN);     didAttach = true; }
+  if (!servoRotate.attached()) { servoRotate.attach(SERVO_ROTATE_PIN); didAttach = true; }
+  if (didAttach) {
+    // Sofort die zuletzt angefahrene Position ausgeben: ein frisch angehängter Servo steuert sonst
+    // zunächst eine Standardposition an, und der Arm ruckelt.
+    if (actualLiftUS > 0)   servoLift.writeMicroseconds(actualLiftUS);
+    if (actualRotateUS > 0) servoRotate.writeMicroseconds(actualRotateUS);
+    Serial.println("Servos angehaengt");
+  }
+}
+
+/**
+ * Löst beide Servos und legt die Signalleitungen aktiv auf LOW.
+ * Eine nach detach() offene (floating) Leitung kann Störimpulse einfangen,
+ * die der Servo als Stellbefehl liest (Brummen/Zittern in Ruhe).
+ */
+void detachServos() {
+  servoLift.detach();
+  servoRotate.detach();
+  pinMode(SERVO_LIFT_PIN, OUTPUT);   digitalWrite(SERVO_LIFT_PIN, LOW);
+  pinMode(SERVO_ROTATE_PIN, OUTPUT); digitalWrite(SERVO_ROTATE_PIN, LOW);
+  Serial.println("Servos abgehaengt");
+}
+
+/**
  * Schützt /save und /test per HTTP Basic Auth, damit nicht jeder im AP
  * ungefragt Konfiguration ändern oder Servos/Pumpe fernauslösen kann.
  * Benutzername ist fix "admin", Passwort = adminPassword (auch AP-Passwort).
@@ -288,8 +331,7 @@ void handleTestMove() {
       currentMechanismTargetAngle = rotationMicroSecs[p]; 
       testTargetPosition = p;
       isSystemBusy = true;
-      if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
-      if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+      attachServos();
       restState = REST_LIFT_UP; 
       server.sendHeader("Location", "/", true); server.send(302, "text/plain", "");
       return;
@@ -342,7 +384,14 @@ bool moveServoGradually(Servo &servo, long &actualValue, long targetValue, unsig
     if (actualValue < targetValue) actualValue += microSecStep;
     else actualValue -= microSecStep;
     if (abs(targetValue - actualValue) < microSecStep) actualValue = targetValue;
+#if DEBUG_BLITZ
+    unsigned long wrStartUs = micros();
+#endif
     servo.writeMicroseconds(actualValue);
+#if DEBUG_BLITZ
+    unsigned long wrDurUs = micros() - wrStartUs;
+    if (wrDurUs > dbgMaxWriteUs) dbgMaxWriteUs = wrDurUs;
+#endif
   }
   return (actualValue == targetValue);
 }
@@ -427,12 +476,15 @@ void handleSensorLogic(int pos, unsigned long currentMillis) {
  * Die zentrale Zustandsmaschine für den mechanischen Füllvorgang.
  */
 void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDuration) {
+  // Im Leerlauf ist currentProcessingPosition == -1: dann gibt es nichts zu tun.
+  // Ohne diese Prüfung würde processState[-1] (Speicher VOR dem Array) gelesen und je nach
+  // Speicherlayout die Servos in jedem Durchlauf wieder angehängt (Servos schalten nie ab).
+  if (pos < 0 || pos >= NUM_GLAS_POSITIONS) return;
   if (pos != currentProcessingPosition) return;
 
   // Servos nur ansteuern, wenn wir nicht gerade nur pumpen (Strom sparen/Zittern vermeiden)
-  if (processState[pos] != PROCESS_PUMP_ON && processState[pos] != PROCESS_IDLE) {
-    if (!servoLift.attached()) servoLift.attach(SERVO_LIFT_PIN);
-    if (!servoRotate.attached()) servoRotate.attach(SERVO_ROTATE_PIN);
+  if (processState[pos] != PROCESS_PUMP_ON && processState[pos] != PROCESS_PUMP_OFF && processState[pos] != PROCESS_IDLE) {
+    attachServos();
   }
   
   switch (processState[pos]) {
@@ -451,6 +503,9 @@ void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDura
         digitalWrite(PinIN1, HIGH); digitalWrite(PinIN2, LOW);
         ledcWrite(PinENA, pumpSpeed); // Pumpe Start
         startTime[pos] = currentMillis;
+#if SERVOS_BEIM_PUMPEN_LOESEN
+        detachServos(); // Arm hängt im Glas, kein Haltestrom/Impulse nötig; Anhängen erfolgt am Ende von PROCESS_PUMP_OFF
+#endif
       }
     break;
     case PROCESS_PUMP_ON: // Befüllung läuft
@@ -465,8 +520,7 @@ void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDura
     break;
     case PROCESS_PUMP_OFF: // Kurze Wartezeit nach dem Pumpen (Nachtropfen)
       if (currentMillis - startTime[pos] >= FINISH_TIME) {
-        servoLift.attach(SERVO_LIFT_PIN);
-        servoRotate.attach(SERVO_ROTATE_PIN);
+        attachServos();
         // Prüfen ob noch ein Glas wartet
         int next = -1;
         for (int i = 0; i < NUM_GLAS_POSITIONS; i++) if (processState[i] == PROCESS_CONFIRMED) { next = i; break; }
@@ -507,7 +561,7 @@ void handleFillingProcess(int pos, unsigned long currentMillis, long fillingDura
     case PROCESS_DETACH_WAIT: // kurze Pause vor dem Detach, damit der Servo nicht mitten in der Fahrt losgelassen wird
       if (currentMillis - fillingDetachWaitStart >= DETACH_SETTLE_MS) {
         processState[pos] = PROCESS_COMPLETE;
-        servoLift.detach(); servoRotate.detach();
+        detachServos();
         isSystemBusy = false; currentProcessingPosition = -1;
       }
     break;
@@ -523,7 +577,7 @@ void handleRestingTimeout(unsigned long currentMillis) {
   if (testTargetPosition == -1 && restState == REST_IDLE && !isSystemBusy) {
     if (actualLiftUS != liftDownMicroSec || actualRotateUS != rotationMicroSecs[REST_POSITION_INDEX]) {
       if (currentMillis - lastActivityTime >= (unsigned long)restDelayMs) {
-        servoLift.attach(SERVO_LIFT_PIN); servoRotate.attach(SERVO_ROTATE_PIN);
+        attachServos();
         currentMechanismTargetAngle = rotationMicroSecs[REST_POSITION_INDEX];
         restState = REST_LIFT_UP;
       }
@@ -547,7 +601,7 @@ void handleRestingTimeout(unsigned long currentMillis) {
       case REST_DETACH_WAIT: // kurze Pause vor dem Detach, damit der Servo nicht mitten in der Fahrt losgelassen wird
         if (currentMillis - restDetachWaitStart >= DETACH_SETTLE_MS) {
           restState = REST_IDLE;
-          servoLift.detach(); servoRotate.detach();
+          detachServos();
           if (testTargetPosition != -1) { isSystemBusy = false; testTargetPosition = -1; }
           lastActivityTime = currentMillis;
         }
@@ -589,7 +643,7 @@ void updateNeoPixels(unsigned long currentMillis) {
         color = strip.Color(0, map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, bluePulse, 0), map(currentMillis - startTime[i], 0, FADE_OUT_DURATION, 0, bluePulse));
       break;
       case LED_BLUE_FLASH: // Blaulicht-Effekt während des Füllens
-        if (BLAULICHT_PATTERN[((i % 2 == 0) ? currentPatternIndexA : currentPatternIndexB)] == 1) color = strip.Color(0, 0, 255);
+        if (BLAULICHT_PATTERN[currentPatternIndexA] == 1) color = strip.Color(0, 0, 255);
       break;
       default: break;
     }
@@ -652,6 +706,11 @@ void setup() {
 
 void loop() {
   unsigned long currentMillis = millis();
+#if DEBUG_BLITZ
+  unsigned long nowUs = micros();
+  if (dbgLastLoopUs != 0 && (nowUs - dbgLastLoopUs) > dbgMaxGapUs) dbgMaxGapUs = nowUs - dbgLastLoopUs;
+  dbgLastLoopUs = nowUs;
+#endif
   
   // Hintergrund-Services
   dnsServer.processNextRequest(); 
@@ -669,7 +728,9 @@ void loop() {
   if (currentMillis - lastPatternChange >= PULSE_DURATION) {
     lastPatternChange = currentMillis;
     currentPatternIndexA = (currentPatternIndexA + 1) % PATTERN_STEPS;
-    currentPatternIndexB = (currentPatternIndexB + 1) % PATTERN_STEPS;
+#if DEBUG_BLITZ
+    dbgPatternSteps++;
+#endif
   }
   
   // Fülldauer vom Poti einlesen
@@ -696,4 +757,19 @@ void loop() {
   handleFillingProcess(currentProcessingPosition, currentMillis, dur);
   handleRestingTimeout(currentMillis);
   updateNeoPixels(currentMillis);
+
+#if DEBUG_BLITZ
+  // Einmal pro Sekunde, nur solange gerade ein Glas bearbeitet wird
+  if (currentMillis - dbgLastReport >= 1000) {
+    if (currentProcessingPosition != -1) {
+      Serial.printf("Blitz: %u Schritte/s (Soll %lu), max Loop-Pause %lu us, max Servo-Write %lu us, Glas %d, Status %d, Akku %.2f V\n",
+                    dbgPatternSteps, 1000UL / PULSE_DURATION, dbgMaxGapUs, dbgMaxWriteUs,
+                    currentProcessingPosition, (int)processState[currentProcessingPosition], currentBatteryVoltage);
+    }
+    dbgLastReport = currentMillis;
+    dbgPatternSteps = 0;
+    dbgMaxGapUs = 0;
+    dbgMaxWriteUs = 0;
+  }
+#endif
 }
